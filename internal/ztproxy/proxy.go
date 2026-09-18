@@ -115,6 +115,38 @@ func (g *Gateway) Responses(w http.ResponseWriter, r *http.Request) {
 	g.forward(w, r, "/responses", rewriteResponsesBody)
 }
 
+// Models 处理 GET /v1/models（模型列表）。上游仅校验 User-Agent，
+// 其余请求头一律不透传；Authorization 仅用于按 key 选择代理出口。
+func (g *Gateway) Models(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	client, err := g.clientFor(extractKey(r.Header.Get("Authorization")))
+	if err != nil {
+		http.Error(w, "proxy client: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, g.upstream+"/models", nil)
+	if err != nil {
+		http.Error(w, "build upstream request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("User-Agent", version.UserAgent())
+
+	g.log.Debug("forwarding", "path", "/models")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "upstream request: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	g.copyResponse(w, resp)
+}
+
 type bodyRewriter func(body map[string]any)
 
 func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, path string, rw bodyRewriter) {
@@ -169,8 +201,12 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, path string, r
 		return
 	}
 	defer resp.Body.Close()
+	g.copyResponse(w, resp)
+}
 
-	// 透传响应头（只保留安全子集）+ 状态码
+// copyResponse 透传上游响应：状态码、响应头（安全子集）与 body。
+// SSE 流式逐块搬运；非流式（如上游错误 JSON / 模型列表）走同一通道一次写完。
+func (g *Gateway) copyResponse(w http.ResponseWriter, resp *http.Response) {
 	for k, vs := range resp.Header {
 		lk := strings.ToLower(k)
 		if lk == "content-length" || lk == "connection" || lk == "transfer-encoding" {
@@ -182,7 +218,6 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, path string, r
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	// SSE 流式逐块搬运；非流式（如上游错误 JSON）走同一通道一次写完
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
 	for {

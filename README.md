@@ -160,9 +160,11 @@ export ZEN_PROXIES='{
 |---|---|---|
 | `POST /v1/chat/completions` | `/chat/completions` | chat 风格模型（见[模型列表](#模型列表)） |
 | `POST /v1/responses` | `/responses` | responses 风格模型 |
+| `GET /v1/models` | `/models` | 查询上游模型列表 |
 | `GET /healthz` | — | 健康检查，返回 `ok` |
 
-`/v1` 前缀可省略。
+`/v1` 前缀可省略。`/v1/models` 仅需 `User-Agent` 即可通过上游校验，网关自动代填，
+客户端无需携带任何请求头（`Authorization` 仅用于 [key→代理路由](#key--代理路由)，不透传上游）。
 
 ## 部署
 

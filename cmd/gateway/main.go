@@ -18,6 +18,7 @@
 //
 //	POST /v1/chat/completions   → 上游 /chat/completions
 //	POST /v1/responses          → 上游 /responses
+//	GET  /v1/models             → 上游 /models
 package main
 
 import (
@@ -70,9 +71,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", gw.ChatCompletions)
 	mux.HandleFunc("/v1/responses", gw.Responses)
+	mux.HandleFunc("/v1/models", gw.Models)
 	// 不带 /v1 前缀也接受，方便不同客户端习惯
 	mux.HandleFunc("/chat/completions", gw.ChatCompletions)
 	mux.HandleFunc("/responses", gw.Responses)
+	mux.HandleFunc("/models", gw.Models)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok\n"))
