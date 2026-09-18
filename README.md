@@ -1,7 +1,7 @@
 # zen-gateway
 
-[![Release](https://img.shields.io/github/v/release/OWNER/REPO?sort=semver&label=release)](https://github.com/OWNER/REPO/releases)
-[![Docker Image](https://img.shields.io/badge/ghcr.io-zen--gateway-blue)](https://github.com/OWNER/REPO/pkgs/container/zen-gateway)
+[![Release](https://img.shields.io/github/v/release/mustang0394/zen-gateway?sort=semver&label=release)](https://github.com/mustang0394/zen-gateway/releases)
+[![Docker Image](https://img.shields.io/badge/ghcr.io-zen--gateway-blue)](https://github.com/mustang0394/zen-gateway/pkgs/container/zen-gateway)
 ![Go](https://img.shields.io/badge/Go-1.27+-00ADD8?logo=go&logoColor=white)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20windows-informational)
 
