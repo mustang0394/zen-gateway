@@ -44,9 +44,15 @@ FROM alpine:3.21
 
 # ca-certificates：上游与 GitHub API 均为 https
 # tzdata：zen 按天冷却到次日 0 点，需要正确时区
+# 显式固定 UID/GID（10001），避免 adduser -S 动态分配导致 bind mount 场景
+# 无法写出稳定的 chown 目标。使用 10000+ 是为了避开 Alpine 的 system 用户区间
+# （CONFIG_FIRST_SYSTEM_ID=100 ~ CONFIG_LAST_SYSTEM_ID=999）与常见宿主 UID。
+ARG PUID=10001
+ARG PGID=10001
+
 RUN apk add --no-cache ca-certificates tzdata \
-    && addgroup -S zen \
-    && adduser -S -G zen -h /nonexistent -s /sbin/nologin zen \
+    && addgroup -g "${PGID}" -S zen \
+    && adduser -u "${PUID}" -G zen -S -h /nonexistent -s /sbin/nologin zen \
     && mkdir -p /data && chown zen:zen /data
 
 COPY --from=builder /out/zen-gateway /usr/local/bin/zen-gateway
@@ -67,6 +73,13 @@ EXPOSE 8080
 #   ZEN_RETENTION_DAYS 统计保留天数（默认 30）
 #
 # 上游 Key、代理、接入 Token 等均在 Web 管理端维护（存入 SQLite）。
+#
+# /data 权限：
+#   命名卷（named volume）——Docker 首次创建卷时会复制镜像中 /data 的属主与权限，
+#   而此处已将 /data 归属 zen(10001:10001)，故无需额外 chown，直接可用。
+#   bind mount——不会复制镜像内属主，宿主目录需手动 chown：
+#     sudo chown -R 10001:10001 /path/on/host
+#   否则容器内 zen 用户无法写入 SQLite，启动时报 permission denied。
 ENV ZEN_LISTEN=":8080" \
     ZEN_DATA_DIR="/data"
 

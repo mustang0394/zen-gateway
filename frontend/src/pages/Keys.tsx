@@ -146,15 +146,19 @@ export default function KeysPage() {
               暂无 Key，点击右上角新增。
             </p>
           ) : (
-            <Table>
+            // 始终使用 table-fixed：超长 key/代理只能在自身列内截断，不会撑宽整表。
+            // 表格自身带 overflow-x-auto，窄屏下改为表格内部横向滚动，
+            // 而不是把整页顶宽（此前 lg:table-fixed 在 <1024px 时会撑破页面）。
+            <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-16">顺序</TableHead>
-                  <TableHead>标签 / 备注</TableHead>
-                  <TableHead>Key</TableHead>
-                  <TableHead>代理</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead className="w-[68px]">顺序</TableHead>
+                  <TableHead className="w-[20%]">标签 / 备注</TableHead>
+                  <TableHead className="w-[28%]">Key</TableHead>
+                  <TableHead className="w-[20%]">代理</TableHead>
+                  <TableHead className="w-[104px]">状态</TableHead>
+                  {/* 三个 28px 图标按钮 + 间距实测约需 88px；列宽不足时按钮会向左溢出压住状态列，故留足 134px */}
+                  <TableHead className="w-[134px] text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -172,10 +176,16 @@ export default function KeysPage() {
                           </Button>
                         </div>
                       </TableCell>
-                      <TableCell className="max-w-[280px]">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium">{k.Label || `#${k.ID}`}</span>
-                          {k.IsAnonymous && <Badge variant="muted">匿名</Badge>}
+                      <TableCell className="overflow-hidden">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="truncate font-medium" title={k.Label || `#${k.ID}`}>
+                            {k.Label || `#${k.ID}`}
+                          </span>
+                          {k.IsAnonymous && (
+                            <Badge variant="muted" className="shrink-0">
+                              匿名
+                            </Badge>
+                          )}
                         </div>
                         {k.Note && (
                           <div className="mt-0.5 truncate text-xs text-[var(--color-muted-foreground)]" title={k.Note}>
@@ -183,25 +193,37 @@ export default function KeysPage() {
                           </div>
                         )}
                       </TableCell>
-                      <TableCell>
-                        <code className="rounded bg-[var(--color-muted)] px-1.5 py-0.5 text-xs">{k.APIKey}</code>
+                      <TableCell className="overflow-hidden">
+                        {/* 超长 key 必须单行截断，title 提供完整值 */}
+                        <code
+                          className="block truncate rounded bg-[var(--color-muted)] px-1.5 py-0.5 text-xs"
+                          title={k.APIKey}
+                        >
+                          {k.APIKey}
+                        </code>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="overflow-hidden">
                         {k.Proxy ? (
-                          <code className="text-xs">{k.Proxy}</code>
+                          <code className="block truncate text-xs" title={k.Proxy}>
+                            {k.Proxy}
+                          </code>
                         ) : (
                           <span className="text-xs text-[var(--color-muted-foreground)]">直连</span>
                         )}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="overflow-hidden">
                         {!k.Enabled ? (
                           <Badge variant="muted">
                             <CircleSlash className="h-3 w-3" /> 停用
                           </Badge>
                         ) : cooling.length > 0 ? (
-                          <div className="grid gap-1">
+                          <div className="flex flex-col items-start gap-1">
                             {cooling.map((c) => (
-                              <Badge key={c.model} variant="warning" title={`${c.model} · ${c.reason}`}>
+                              <Badge
+                                key={c.model}
+                                variant="warning"
+                                title={`${c.model} · ${c.reason}`}
+                              >
                                 <Snowflake className="h-3 w-3" /> {c.remaining}
                               </Badge>
                             ))}
@@ -213,19 +235,33 @@ export default function KeysPage() {
                         )}
                       </TableCell>
                       <TableCell className="text-right">
-                        <div className="flex justify-end gap-1">
-                          <Button variant="ghost" size="sm" onClick={() => probe.mutate(k.ID)} title="校验代理配置">
+                        <div className="flex shrink-0 justify-end gap-0.5">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => probe.mutate(k.ID)}
+                            title="校验代理配置"
+                          >
                             <Zap className="h-3.5 w-3.5" />
                           </Button>
-                          <Button variant="ghost" size="sm" onClick={() => openEdit(k)}>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => openEdit(k)}
+                            title="编辑"
+                          >
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
                           <Button
                             variant="ghost"
-                            size="sm"
+                            size="icon"
+                            className="h-7 w-7"
                             onClick={() => {
                               if (confirm(`确认删除「${k.Label || k.ID}」？将同时清除其冷却记录。`)) remove.mutate(k.ID);
                             }}
+                            title="删除"
                           >
                             <Trash2 className="h-3.5 w-3.5 text-[var(--color-destructive)]" />
                           </Button>

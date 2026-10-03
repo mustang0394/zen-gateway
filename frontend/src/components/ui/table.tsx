@@ -3,12 +3,12 @@ import { cn } from "@/lib/utils";
 
 export function Table({ className, ...props }: React.TableHTMLAttributes<HTMLTableElement>) {
   return (
-    <div className="w-full overflow-x-auto">
+    // min-w-0 防止 flex/grid 父容器被表格撑宽，横向滚动留在本组件内部
+    <div className="w-full min-w-0 overflow-x-auto">
       <table className={cn("w-full caption-bottom text-sm", className)} {...props} />
     </div>
   );
 }
-
 export function TableHeader({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
   return <thead className={cn("[&_tr]:border-b [&_tr]:border-[var(--color-border)]", className)} {...props} />;
 }

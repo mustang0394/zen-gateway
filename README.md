@@ -280,6 +280,40 @@ volumes:
 镜像基于 Alpine，多阶段构建，非 root 用户运行，内置健康检查。
 上游 Key 与设置全部存在 `/data` 卷中，升级镜像不会丢失。
 
+### 数据目录权限（`/data`）
+
+容器内以非 root 的 `zen` 用户运行，其 **UID/GID 固定为 `10001:10001`**
+（可在构建时用 `--build-arg PUID=... PGID=...` 覆盖，需同时保证 `/data` 属主一致）。
+
+**命名卷（推荐，无需任何 chown）**
+
+Docker 首次创建命名卷时会把镜像中 `/data` 的属主与权限一并复制过去，
+而镜像里 `/data` 已属于 `zen`，因此容器可直接读写：
+
+```yaml
+volumes:
+  - zen-data:/data
+```
+
+**bind mount（需手动 chown）**
+
+bind mount 不会复制镜像内的属主，会沿用宿主机目录的 owner，因此首次部署需：
+
+```bash
+mkdir -p ./data
+sudo chown -R 10001:10001 ./data      # 与镜像内 zen 用户一致
+docker run -d --name zen-gateway -p 8080:8080 \
+  -e ZEN_ADMIN_TOKEN=change-me \
+  -v "$PWD/data:/data" \
+  ghcr.io/mustang0394/zen-gateway:latest
+```
+
+若省略这一步，容器会因无法写入 SQLite 而启动失败，日志中会出现
+`open store: ... permission denied`。
+
+> 权限说明：数据库文件以 `0700` 目录权限创建，仅 `zen` 用户可读写；
+> 若你需要用宿主机工具直接查看 `gateway.db`，可自行调整目录权限。
+
 ## 构建
 
 ### 本地构建
