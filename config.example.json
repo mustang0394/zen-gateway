@@ -1,8 +1,0 @@
-{
-  "listen": ":8080",
-  "proxies": {
-    "public": "http://proxy-a.example.com:8080",
-    "oc_sk_yourkey1": "socks5h://user:password@proxy-b.example.com:1080",
-    "oc_sk_yourkey2": "socks5://proxy-c.example.com:1080"
-  }
-}

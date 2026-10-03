@@ -1,0 +1,11 @@
+# 构建产物与运行时数据
+/zen-gateway
+/zen-gateway.exe
+data/
+*.db
+*.db-wal
+*.db-shm
+backups/
+node_modules/
+# TypeScript 增量构建缓存（前端产物 internal/web/dist 需要入库，不在此列）
+*.tsbuildinfo

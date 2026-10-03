@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>zen-gateway 管理端</title>
+    <script>
+      // 首屏前应用主题，避免深/浅色闪烁。
+      // 与 src/hooks/use-theme.ts 使用同一个 localStorage 键与判定规则。
+      (function () {
+        try {
+          var mode = localStorage.getItem("zen_admin_theme") || "system";
+          var dark =
+            mode === "dark" ||
+            (mode === "system" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+        } catch (e) {
+          /* localStorage 不可用时保持浅色 */
+        }
+      })();
+    </script>
+    <script type="module" crossorigin src="/admin/assets/index-VfGA0Sfu.js"></script>
+    <link rel="stylesheet" crossorigin href="/admin/assets/index-BuifuOny.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

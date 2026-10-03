@@ -1,96 +1,107 @@
-// Package config 解析 key→代理 的映射配置。
+// Package config 提供运行时配置，来源优先级：
 //
-// 三种来源，优先级从高到低：
+//	命令行 flag > 环境变量 > 默认值
 //
-//  1. 命令行 flag（-listen / -config）
-//  2. 环境变量（Docker 部署推荐）：
-//     ZEN_LISTEN  — 监听地址，如 ":8080"
-//     ZEN_PROXIES — JSON 对象 {"key":"proxy-url", ...}
-//  3. 配置文件（JSON，-config 指定）：
-//
-//	{
-//	  "listen": ":8080",
-//	  "proxies": {
-//	    "oc_sk_xxxxx": "socks5h://user:pass@1.2.3.4:1080",
-//	    "public":      "http://5.6.7.8:8080"
-//	  }
-//	}
-//
-// 语义：客户端 Authorization: Bearer <key> 命中 proxies 里的键时走对应代理；
-// 未命中（包括没传 key 而网关补的 "public" 也没有映射）则直连。
+// 业务配置（上游 key、代理、下游 token、版本号等）一律存放在 SQLite，
+// 由 Web 管理端维护；这里只保留进程级与部署相关配置。
 package config
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
-// Env 变量名。
+// 环境变量名。
 const (
-	EnvListen  = "ZEN_LISTEN"
-	EnvProxies = "ZEN_PROXIES"
+	EnvListen      = "ZEN_LISTEN"
+	EnvAdminToken  = "ZEN_ADMIN_TOKEN"
+	EnvDataDir     = "ZEN_DATA_DIR"
+	EnvDBPath      = "ZEN_DB_PATH"
+	EnvZenUpstream = "ZEN_UPSTREAM"
+	EnvClineUpstrm = "ZEN_CLINE_UPSTREAM"
+	EnvRetention   = "ZEN_RETENTION_DAYS"
+	EnvClineCool   = "ZEN_CLINE_COOLDOWN_FALLBACK"
 )
 
-type File struct {
-	Listen  string            `json:"listen"`
-	Proxies map[string]string `json:"proxies"`
+// Config 是进程级配置。
+type Config struct {
+	// Listen 是网关监听地址。
+	Listen string
+	// DataDir 是运行时数据目录（存放 SQLite 数据库）。
+	DataDir string
+	// DBPath 是 SQLite 文件路径（优先于 DataDir 推导）。
+	DBPath string
+	// AdminToken 是 Web 管理端口令；为空则管理端不启用。
+	AdminToken string
+	// ZenUpstream 是 zen 模块上游基址。
+	ZenUpstream string
+	// ClineUpstream 是 cline 模块上游基址。
+	ClineUpstream string
+	// RetentionDays 是统计与明细的保留天数。
+	RetentionDays int
+	// ClineCooldownFallback 是 cline 429 无法解析冷却时长时的兜底值。
+	ClineCooldownFallback time.Duration
+	// Verbose 开启调试日志。
+	Verbose bool
 }
 
-// Load 组装最终配置。
-//
-//   - path 非空时读取配置文件；文件里 listen/proxies 为对应来源的默认值
-//   - env 始终参与合并，但显式 flag 在 main 里最后覆盖
-//   - 未设置任何来源时 Listen 回落 ":8080"、Proxies 为空（全直连）
-func Load(path string) (*File, error) {
-	f := &File{Proxies: map[string]string{}}
-
-	// 1) 配置文件
-	if path != "" {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read config %q: %w", path, err)
-		}
-		if err := json.Unmarshal(raw, f); err != nil {
-			return nil, fmt.Errorf("parse config %q: %w", path, err)
-		}
-		if f.Proxies == nil {
-			f.Proxies = map[string]string{}
-		}
+// Defaults 返回默认配置。
+func Defaults() Config {
+	return Config{
+		Listen:                ":8080",
+		DataDir:               "data",
+		ZenUpstream:           "https://opencode.ai/zen/v1",
+		ClineUpstream:         "https://api.cline.bot/api/v1",
+		RetentionDays:         30,
+		ClineCooldownFallback: time.Hour,
 	}
+}
 
-	// 2) 环境变量（覆盖文件值；Docker 场景无需映射配置文件）
+// Load 从环境变量装配配置。flags 由调用方在解析后覆盖对应字段。
+func Load() Config {
+	c := Defaults()
+
 	if v := strings.TrimSpace(os.Getenv(EnvListen)); v != "" {
-		f.Listen = v
+		c.Listen = v
 	}
-	if v := strings.TrimSpace(os.Getenv(EnvProxies)); v != "" {
-		var proxies map[string]string
-		if err := json.Unmarshal([]byte(v), &proxies); err != nil {
-			return nil, fmt.Errorf("parse %s: %w (want JSON object like {\"key\":\"socks5h://host:1080\"})", EnvProxies, err)
+	if v := strings.TrimSpace(os.Getenv(EnvDataDir)); v != "" {
+		c.DataDir = v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvDBPath)); v != "" {
+		c.DBPath = v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvAdminToken)); v != "" {
+		c.AdminToken = v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvZenUpstream)); v != "" {
+		c.ZenUpstream = v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvClineUpstrm)); v != "" {
+		c.ClineUpstream = v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvRetention)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.RetentionDays = n
 		}
-		for k, p := range proxies {
-			if k == "" || strings.TrimSpace(p) == "" {
-				continue // 忽略空映射项
-			}
-			f.Proxies[k] = strings.TrimSpace(p)
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvClineCool)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.ClineCooldownFallback = d
 		}
 	}
-
-	// 3) 默认值
-	if f.Listen == "" {
-		f.Listen = ":8080"
-	}
-	if f.Proxies == nil {
-		f.Proxies = map[string]string{}
-	}
-	return f, nil
+	return c
 }
 
-// ProxyFor 返回该 key 应使用的代理 URL；不存在返回空串（直连）。
-func (f *File) ProxyFor(key string) string {
-	if f == nil {
-		return ""
+// DatabasePath 返回最终数据库文件路径。
+func (c Config) DatabasePath() string {
+	if strings.TrimSpace(c.DBPath) != "" {
+		return c.DBPath
 	}
-	return f.Proxies[key]
+	return filepath.Join(c.DataDir, "gateway.db")
 }
+
+// AdminEnabled 表示管理端是否可用（需配置口令）。
+func (c Config) AdminEnabled() bool { return strings.TrimSpace(c.AdminToken) != "" }
