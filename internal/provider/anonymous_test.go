@@ -29,7 +29,7 @@ func TestAnonymousFallbackRespectsCooldown(t *testing.T) {
 	defer up.Close()
 
 	st := newStore(t) // 故意不添加任何 key
-	h := provider.NewHandler(zen.New(up.URL), provider.Runtime{
+	h := provider.NewHandler(zen.New(up.URL, nil), provider.Runtime{
 		Store:    st,
 		Versions: func() provider.Versions { return provider.Versions{Zen: "1.18.34"} },
 	})

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"zengateway/internal/cooldown"
+	"zengateway/internal/rewrite"
 	"zengateway/internal/store"
 	"zengateway/internal/version"
 )
@@ -29,7 +30,8 @@ func newServer(t *testing.T) (*Server, *store.Store) {
 	log := slog.New(slog.DiscardHandler)
 	vers := version.New(st, log, version.DefaultTargets())
 	cool := cooldown.New(st, log)
-	srv := New(st, vers, cool, log, testToken, "https://zen.example/v1", "https://cline.example/api")
+	rw := rewrite.New(st, log)
+	srv := New(st, vers, cool, rw, log, testToken, "https://zen.example/v1", "https://cline.example/api")
 	if srv == nil {
 		t.Fatal("server must not be nil when token configured")
 	}
@@ -65,10 +67,10 @@ func TestDisabledWithoutToken(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	if got := New(st, nil, nil, nil, "", "", ""); got != nil {
+	if got := New(st, nil, nil, nil, nil, "", "", ""); got != nil {
 		t.Error("web server must be nil when no admin token set")
 	}
-	if got := New(st, nil, nil, nil, "   ", "", ""); got != nil {
+	if got := New(st, nil, nil, nil, nil, "   ", "", ""); got != nil {
 		t.Error("blank token must not enable admin")
 	}
 }

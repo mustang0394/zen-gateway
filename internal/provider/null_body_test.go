@@ -11,7 +11,7 @@ import (
 func TestNullJsonBodyDoesNotPanic(t *testing.T) {
 	fake := newFakeUpstream(t, scripted{status: 200, body: `{"ok":true}`})
 	st := newStore(t)
-	h := newHandler(t, zen.New(fake.srv.URL), st)
+	h := newHandler(t, zen.New(fake.srv.URL, nil), st)
 
 	// JSON null 与 {} 均可解码为 map（null 得到 nil map，已回退为空对象），
 	// 因此应正常转发；数组/字符串/数字无法解码为对象，应返回 400。

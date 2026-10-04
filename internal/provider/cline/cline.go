@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"zengateway/internal/provider"
+	"zengateway/internal/rewrite"
 	"zengateway/internal/store"
 )
 
@@ -45,17 +46,23 @@ type Provider struct {
 	upstream string
 	// fallbackCooldown 是 429 错误文本无法解析时的兜底冷却时长。
 	fallbackCooldown time.Duration
+	// rw 是系统提示词改写引擎；为 nil 时跳过改写。
+	rw *rewrite.Engine
 }
 
-// New 创建 cline 模块。fallback 为 429 解析失败时的兜底冷却。
-func New(upstreamBase string, fallback time.Duration) *Provider {
+// New 创建 cline 模块。fallback 为 429 解析失败时的兜底冷却，rw 为 nil 表示不改写。
+func New(upstreamBase string, fallback time.Duration, rw *rewrite.Engine) *Provider {
 	if strings.TrimSpace(upstreamBase) == "" {
 		upstreamBase = DefaultUpstream
 	}
 	if fallback <= 0 {
 		fallback = time.Hour
 	}
-	return &Provider{upstream: strings.TrimRight(upstreamBase, "/"), fallbackCooldown: fallback}
+	return &Provider{
+		upstream:         strings.TrimRight(upstreamBase, "/"),
+		fallbackCooldown: fallback,
+		rw:               rw,
+	}
 }
 
 func (p *Provider) Name() string         { return "cline" }
@@ -74,8 +81,14 @@ func (p *Provider) PathFor(kind provider.Kind) string {
 	}
 }
 
-// PrepareBody cline 不需要改写请求体。
-func (p *Provider) PrepareBody(provider.Kind, map[string]any) bool { return false }
+// PrepareBody 按提示词规则改写请求体文本；cline 不改动 stream 与其他字段。
+func (p *Provider) PrepareBody(kind provider.Kind, body map[string]any) bool {
+	if p.rw == nil || body == nil {
+		return false
+	}
+	res := p.rw.Apply(p.Name(), string(kind), body)
+	return res.Total > 0
+}
 
 // BuildHeaders 完全忽略下游请求头，只构造固定的 Cline 产品头。
 func (p *Provider) BuildHeaders(_ http.Header, key store.APIKey, v provider.Versions) http.Header {

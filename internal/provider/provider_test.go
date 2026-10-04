@@ -88,13 +88,13 @@ func newHandler(t *testing.T, p provider.Provider, st *store.Store) *testAPI {
 	api := &testAPI{tokens: map[string]string{"cline": "gw-token", "zen": ""}}
 	if p.Name() == "cline" {
 		api.clineH = h
-		api.zenH = provider.NewHandler(zen.New("http://127.0.0.1:1"), provider.Runtime{
+		api.zenH = provider.NewHandler(zen.New("http://127.0.0.1:1", nil), provider.Runtime{
 			Store: st, Log: slog.New(slog.DiscardHandler),
 			Versions: func() provider.Versions { return provider.Versions{Zen: "1.18.31"} },
 		})
 	} else {
 		api.zenH = h
-		api.clineH = provider.NewHandler(cline.New("http://127.0.0.1:1", time.Hour), provider.Runtime{
+		api.clineH = provider.NewHandler(cline.New("http://127.0.0.1:1", time.Hour, nil), provider.Runtime{
 			Store: st, Log: slog.New(slog.DiscardHandler),
 			Versions: func() provider.Versions { return provider.Versions{ClineCLI: "4.1.22", ClineSDK: "0.0.90"} },
 		})
@@ -171,7 +171,7 @@ func postJSON(t *testing.T, h http.Handler, path, auth string, body string) *htt
 // ---- zen 模块 -------------------------------------------------------------
 
 func TestZenBuildHeadersRewriteAndDefaults(t *testing.T) {
-	p := zen.New("")
+	p := zen.New("", nil)
 	down := http.Header{}
 	down.Set("User-Agent", "evil-client/1.0")
 	down.Set("Cookie", "secret=1")
@@ -209,7 +209,7 @@ func TestZenBuildHeadersRewriteAndDefaults(t *testing.T) {
 }
 
 func TestZenPrepareBodyForcesStreamAndTools(t *testing.T) {
-	p := zen.New("")
+	p := zen.New("", nil)
 	body := map[string]any{"model": "m", "stream": false}
 	p.PrepareBody(provider.KindChat, body)
 	if body["stream"] != true {
@@ -239,7 +239,7 @@ func TestZenPrepareBodyForcesStreamAndTools(t *testing.T) {
 }
 
 func TestZenClassifyOnly429(t *testing.T) {
-	p := zen.New("")
+	p := zen.New("", nil)
 	if d := p.Classify(http.StatusForbidden, []byte("nope")); d.Action != provider.ActionPass {
 		t.Error("zen must not handle 403")
 	}
@@ -258,7 +258,7 @@ func TestZenClassifyOnly429(t *testing.T) {
 func TestZenEndToEndPassthroughAndStats(t *testing.T) {
 	fake := newFakeUpstream(t, scripted{status: 200, body: `{"choices":[]}`})
 	st := newStore(t)
-	p := zen.New(fake.srv.URL)
+	p := zen.New(fake.srv.URL, nil)
 	h := newHandler(t, p, st)
 
 	rec := postJSON(t, h, "/zen/v1/chat/completions", "",
@@ -300,7 +300,7 @@ func TestZenEndToEndPassthroughAndStats(t *testing.T) {
 // ---- cline 模块 -----------------------------------------------------------
 
 func TestClineHeadersAreFullySynthetic(t *testing.T) {
-	p := cline.New("", time.Hour)
+	p := cline.New("", time.Hour, nil)
 	down := http.Header{}
 	down.Set("Authorization", "Bearer downstream-token")
 	down.Set("User-Agent", "python-requests/2.0")
@@ -338,7 +338,7 @@ func TestClineHeadersAreFullySynthetic(t *testing.T) {
 // TestClineUpstreamCarriesV1InBase 验证 /v1 位于基址中（与 zen 对称），
 // PathFor 只返回业务路径，避免拼出 /api/v1/v1/... 这类重复前缀。
 func TestClineUpstreamCarriesV1InBase(t *testing.T) {
-	p := cline.New("", time.Hour)
+	p := cline.New("", time.Hour, nil)
 
 	if got := p.UpstreamBase(); got != "https://api.cline.bot/api/v1" {
 		t.Errorf("UpstreamBase = %q, want https://api.cline.bot/api/v1", got)
@@ -370,12 +370,12 @@ func TestClineUpstreamCarriesV1InBase(t *testing.T) {
 	}
 
 	// 自定义基址同样不应重复 /v1
-	custom := cline.New("http://127.0.0.1:9/api/v1", time.Hour)
+	custom := cline.New("http://127.0.0.1:9/api/v1", time.Hour, nil)
 	if got := custom.UpstreamBase() + custom.PathFor(provider.KindChat); got != "http://127.0.0.1:9/api/v1/chat/completions" {
 		t.Errorf("custom base URL = %q", got)
 	}
 	// 基址末尾斜杠需被规范化
-	slash := cline.New("http://127.0.0.1:9/api/v1/", time.Hour)
+	slash := cline.New("http://127.0.0.1:9/api/v1/", time.Hour, nil)
 	if got := slash.UpstreamBase() + slash.PathFor(provider.KindChat); got != "http://127.0.0.1:9/api/v1/chat/completions" {
 		t.Errorf("trailing slash base URL = %q", got)
 	}
@@ -419,7 +419,7 @@ func TestClineRetries403ProductSurfaceThreeTimes(t *testing.T) {
 	if _, err := st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-1", Enabled: true}); err != nil {
 		t.Fatalf("create key: %v", err)
 	}
-	h := newHandler(t, cline.New(fake.srv.URL, time.Hour), st)
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
 
 	rec := postJSON(t, h, "/cline/v1/chat/completions", "gw-token", `{"model":"mimo-v2.6-flash","stream":true}`)
 	if rec.Code != 200 {
@@ -447,7 +447,7 @@ func TestClineReturns403WhenRetriesExhausted(t *testing.T) {
 	for i := 0; i < keys; i++ {
 		// 只有 1 个 key，重试后仍失败
 	}
-	h := newHandler(t, cline.New(fake.srv.URL, time.Hour), st)
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
 
 	rec := postJSON(t, h, "/cline/v1/chat/completions", "gw-token", `{"model":"x","stream":true}`)
 	if rec.Code != 403 {
@@ -465,7 +465,7 @@ func TestCline403WithoutHintIsNotRetried(t *testing.T) {
 	fake := newFakeUpstream(t, scripted{status: 403, body: `{"error":"some other 403"}`})
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-1", Enabled: true})
-	h := newHandler(t, cline.New(fake.srv.URL, time.Hour), st)
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
 
 	rec := postJSON(t, h, "/cline/v1/chat/completions", "gw-token", `{"model":"x"}`)
 	if rec.Code != 403 {
@@ -485,7 +485,7 @@ func TestCline429CoolsDownKeyForModelAndSwitches(t *testing.T) {
 	st := newStore(t)
 	a, _ := st.CreateKey(store.APIKey{Module: "cline", Label: "A", APIKey: "sk-a", Enabled: true})
 	b, _ := st.CreateKey(store.APIKey{Module: "cline", Label: "B", APIKey: "sk-b", Enabled: true})
-	h := newHandler(t, cline.New(fake.srv.URL, time.Hour), st)
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
 
 	rec := postJSON(t, h, "/cline/v1/chat/completions", "gw-token", `{"model":"z-ai/glm-5.3-flash"}`)
 	if rec.Code != 200 {
@@ -532,7 +532,7 @@ func TestClineAllKeysCoolingReturns429(t *testing.T) {
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-a", Enabled: true})
 	st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-b", Enabled: true})
-	h := newHandler(t, cline.New(fake.srv.URL, time.Hour), st)
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
 
 	rec := postJSON(t, h, "/cline/v1/chat/completions", "gw-token", `{"model":"m"}`)
 	if rec.Code != 429 {
@@ -556,7 +556,7 @@ func TestAccessTokenEnforced(t *testing.T) {
 	fake := newFakeUpstream(t)
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-1", Enabled: true})
-	h := newHandler(t, cline.New(fake.srv.URL, time.Hour), st)
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
 
 	// 错误 token
 	rec := postJSON(t, h, "/cline/v1/chat/completions", "wrong", `{"model":"m"}`)
@@ -577,7 +577,7 @@ func TestAccessTokenEnforced(t *testing.T) {
 func TestZenAllowsAnonymousWhenNoToken(t *testing.T) {
 	fake := newFakeUpstream(t)
 	st := newStore(t)
-	h := newHandler(t, zen.New(fake.srv.URL), st)
+	h := newHandler(t, zen.New(fake.srv.URL, nil), st)
 
 	rec := postJSON(t, h, "/zen/v1/chat/completions", "", `{"model":"m"}`)
 	if rec.Code != 200 {
@@ -588,7 +588,7 @@ func TestZenAllowsAnonymousWhenNoToken(t *testing.T) {
 func TestClineRequiresKeyInPool(t *testing.T) {
 	fake := newFakeUpstream(t)
 	st := newStore(t) // 不添加任何 key
-	h := newHandler(t, cline.New(fake.srv.URL, time.Hour), st)
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
 
 	rec := postJSON(t, h, "/cline/v1/chat/completions", "gw-token", `{"model":"m"}`)
 	if rec.Code != 429 && rec.Code != 503 {
@@ -617,9 +617,9 @@ func TestResponsesPathBothModules(t *testing.T) {
 
 			var p provider.Provider
 			if tc.mod == "zen" {
-				p = zen.New(fake.srv.URL)
+				p = zen.New(fake.srv.URL, nil)
 			} else {
-				p = cline.New(fake.srv.URL, time.Hour)
+				p = cline.New(fake.srv.URL, time.Hour, nil)
 			}
 			h := newHandler(t, p, st)
 
@@ -639,7 +639,7 @@ func TestModelsEndpointUsesKeyAndPath(t *testing.T) {
 	fake := newFakeUpstream(t, scripted{status: 200, body: `{"object":"list","data":[]}`})
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-1", Enabled: true})
-	h := newHandler(t, cline.New(fake.srv.URL, time.Hour), st)
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
 
 	req := httptest.NewRequest(http.MethodGet, "/cline/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer gw-token")
@@ -665,7 +665,7 @@ func TestSequentialKeyPreferenceKeepsCacheWarm(t *testing.T) {
 	st := newStore(t)
 	a, _ := st.CreateKey(store.APIKey{Module: "cline", Label: "A", APIKey: "sk-a", Enabled: true})
 	st.CreateKey(store.APIKey{Module: "cline", Label: "B", APIKey: "sk-b", Enabled: true})
-	h := newHandler(t, cline.New(fake.srv.URL, time.Hour), st)
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
 
 	// 连续 3 次请求都应优先使用 A（顺序优先，保证上游缓存命中）
 	for i := 0; i < 3; i++ {
@@ -703,7 +703,7 @@ func TestProxyPerKey(t *testing.T) {
 func TestLargeBodyLimit(t *testing.T) {
 	fake := newFakeUpstream(t)
 	st := newStore(t)
-	h := newHandler(t, zen.New(fake.srv.URL), st)
+	h := newHandler(t, zen.New(fake.srv.URL, nil), st)
 
 	big := bytes.Repeat([]byte("a"), provider.MaxBodyBytes+1024)
 	body := `{"model":"m","x":"` + string(big) + `"}`
@@ -719,7 +719,7 @@ func TestModelsRequestIsCountedInStats(t *testing.T) {
 	fake := newFakeUpstream(t, scripted{status: 200, body: `{"object":"list","data":[]}`})
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "zen", APIKey: "public", Enabled: true, IsAnonymous: true})
-	h := newHandler(t, zen.New(fake.srv.URL), st)
+	h := newHandler(t, zen.New(fake.srv.URL, nil), st)
 
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/zen/v1/models", nil)
@@ -750,7 +750,7 @@ func TestUpstreamFailureIsCountedAsError(t *testing.T) {
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "zen", APIKey: "public", Enabled: true, IsAnonymous: true})
 	// 指向一个不监听的端口
-	h := newHandler(t, zen.New("http://127.0.0.1:1"), st)
+	h := newHandler(t, zen.New("http://127.0.0.1:1", nil), st)
 
 	rec := postJSON(t, h, "/zen/v1/chat/completions", "", `{"model":"m"}`)
 	if rec.Code != http.StatusBadGateway {

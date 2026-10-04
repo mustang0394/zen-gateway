@@ -41,7 +41,7 @@ func TestStreamingStatsEndToEnd(t *testing.T) {
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "zen", Label: "A", APIKey: "public", Enabled: true, IsAnonymous: true})
 
-	h := provider.NewHandler(zen.New(up.URL), provider.Runtime{
+	h := provider.NewHandler(zen.New(up.URL, nil), provider.Runtime{
 		Store: st,
 		Versions: func() provider.Versions {
 			return provider.Versions{Zen: "1.18.34"}
@@ -116,7 +116,7 @@ func TestZenCooldownUntilNextMidnightEndToEnd(t *testing.T) {
 	a, _ := st.CreateKey(store.APIKey{Module: "zen", Label: "A", APIKey: "public", Enabled: true, IsAnonymous: true})
 	b, _ := st.CreateKey(store.APIKey{Module: "zen", Label: "B", APIKey: "public", Enabled: true, IsAnonymous: true})
 
-	h := provider.NewHandler(zen.New(up.URL), provider.Runtime{
+	h := provider.NewHandler(zen.New(up.URL, nil), provider.Runtime{
 		Store: st,
 		Versions: func() provider.Versions {
 			return provider.Versions{Zen: "1.18.34"}
@@ -175,8 +175,8 @@ func TestFullRouterIntegration(t *testing.T) {
 	versions := func() provider.Versions {
 		return provider.Versions{Zen: "1.18.34", ClineCLI: "4.1.22", ClineSDK: "0.0.90"}
 	}
-	zenH := provider.NewHandler(zen.New(up.URL), provider.Runtime{Store: st, Versions: versions})
-	clineH := provider.NewHandler(cline.New(up.URL, time.Hour), provider.Runtime{Store: st, Versions: versions})
+	zenH := provider.NewHandler(zen.New(up.URL, nil), provider.Runtime{Store: st, Versions: versions})
+	clineH := provider.NewHandler(cline.New(up.URL, time.Hour, nil), provider.Runtime{Store: st, Versions: versions})
 
 	tokens := map[string]string{"zen": "", "cline": "gw-cline"}
 	rt := router.New(map[string]router.ModuleHandler{"zen": zenH, "cline": clineH},
@@ -274,7 +274,7 @@ func TestClineRequestHeadersReachUpstream(t *testing.T) {
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-up", Enabled: true})
 
-	h := provider.NewHandler(cline.New(up.URL, time.Hour), provider.Runtime{
+	h := provider.NewHandler(cline.New(up.URL, time.Hour, nil), provider.Runtime{
 		Store: st,
 		Versions: func() provider.Versions {
 			return provider.Versions{ClineCLI: "4.1.22", ClineSDK: "0.0.90"}
@@ -334,7 +334,7 @@ func TestZenHeadersReachUpstream(t *testing.T) {
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "zen", APIKey: "public", Enabled: true, IsAnonymous: true})
 
-	h := provider.NewHandler(zen.New(up.URL), provider.Runtime{
+	h := provider.NewHandler(zen.New(up.URL, nil), provider.Runtime{
 		Store: st,
 		Versions: func() provider.Versions {
 			return provider.Versions{Zen: "1.18.34"}
@@ -399,7 +399,7 @@ func TestCline429ParsesModelFromError(t *testing.T) {
 	st := newStore(t)
 	k, _ := st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk", Enabled: true})
 
-	h := provider.NewHandler(cline.New(up.URL, time.Hour), provider.Runtime{
+	h := provider.NewHandler(cline.New(up.URL, time.Hour, nil), provider.Runtime{
 		Store: st,
 		Versions: func() provider.Versions {
 			return provider.Versions{ClineCLI: "4.1.22", ClineSDK: "0.0.90"}

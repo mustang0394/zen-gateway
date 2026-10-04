@@ -111,6 +111,23 @@ var migrations = []string{
 		k TEXT PRIMARY KEY,
 		v TEXT NOT NULL,
 		updated_at INTEGER NOT NULL)`,
+	`CREATE TABLE rewrite_rules (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		module TEXT NOT NULL,
+		name TEXT NOT NULL DEFAULT '',
+		match TEXT NOT NULL,
+		replace TEXT NOT NULL,
+		is_regex INTEGER NOT NULL DEFAULT 0,
+		case_sensitive INTEGER NOT NULL DEFAULT 1,
+		scope TEXT NOT NULL DEFAULT 'system_first_user',
+		include_tools INTEGER NOT NULL DEFAULT 0,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		sort_order INTEGER NOT NULL DEFAULT 0,
+		hits INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		deleted_at INTEGER)`,
+	`CREATE INDEX ix_rewrite_rules ON rewrite_rules(module, deleted_at, sort_order, id)`,
 }
 
 // Open 打开（必要时创建）数据库并执行迁移，随后启动统计落盘协程。
