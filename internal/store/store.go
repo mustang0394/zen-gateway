@@ -111,7 +111,22 @@ var migrations = []string{
 		k TEXT PRIMARY KEY,
 		v TEXT NOT NULL,
 		updated_at INTEGER NOT NULL)`,
-	`CREATE TABLE inject_keywords (
+	// v10 / v11 —— 历史占位，内容为幂等空操作。
+	//
+	// 这两个版本号曾被「提示词子串替换」功能用于建 rewrite_rules 表与索引（该功能已废弃）。
+	// 由于它们已在部分数据库中记录为「已应用」，**绝不能再复用这两个版本号承载新表**：
+	// 已升级的库会因 version <= current 而跳过执行，导致新表缺失
+	// （曾因此出现 "no such table: inject_keywords"）。
+	`SELECT 1`,
+	`SELECT 1`,
+	// v12 —— 与已应用状态保持一致（提示词覆盖表）
+	`CREATE TABLE IF NOT EXISTS prompt_overrides (
+		module TEXT PRIMARY KEY,
+		text TEXT NOT NULL,
+		updated_at INTEGER NOT NULL)`,
+	// v13 / v14 —— 新表追加在末尾。
+	// 使用 IF NOT EXISTS：兼容「曾运行过中间版本、已提前创建该表」的数据库。
+	`CREATE TABLE IF NOT EXISTS inject_keywords (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		module TEXT NOT NULL,
 		keyword TEXT NOT NULL,
@@ -122,11 +137,7 @@ var migrations = []string{
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		deleted_at INTEGER)`,
-	`CREATE INDEX ix_inject_keywords ON inject_keywords(module, deleted_at, sort_order, id)`,
-	`CREATE TABLE prompt_overrides (
-		module TEXT PRIMARY KEY,
-		text TEXT NOT NULL,
-		updated_at INTEGER NOT NULL)`,
+	`CREATE INDEX IF NOT EXISTS ix_inject_keywords ON inject_keywords(module, deleted_at, sort_order, id)`,
 }
 
 // Open 打开（必要时创建）数据库并执行迁移，随后启动统计落盘协程。
