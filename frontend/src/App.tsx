@@ -4,7 +4,7 @@ import {
   Activity,
   KeyRound,
   RefreshCw,
-  Replace,
+  ShieldCheck,
   Server,
   Settings as Cog,
   Snowflake,
@@ -15,7 +15,7 @@ import LoginPage from "@/pages/Login";
 import KeysPage from "@/pages/Keys";
 import VersionsPage from "@/pages/Versions";
 import CooldownsPage from "@/pages/Cooldowns";
-import RewritesPage from "@/pages/Rewrites";
+import KeywordsPage from "@/pages/Keywords";
 import StatsPage from "@/pages/Stats";
 import SettingsPage from "@/pages/Settings";
 import { clearToken, loadToken } from "@/lib/api";
@@ -25,7 +25,7 @@ const navItems = [
   { to: "/keys", label: "Key 管理", icon: KeyRound },
   { to: "/versions", label: "版本号", icon: Server },
   { to: "/cooldowns", label: "冷却池", icon: Snowflake },
-  { to: "/rewrites", label: "提示词改写", icon: Replace },
+  { to: "/keywords", label: "提示词注入", icon: ShieldCheck },
   { to: "/settings", label: "设置", icon: Cog },
 ];
 
@@ -92,7 +92,7 @@ export default function App() {
           <Route path="/keys" element={<KeysPage />} />
           <Route path="/versions" element={<VersionsPage />} />
           <Route path="/cooldowns" element={<CooldownsPage />} />
-          <Route path="/rewrites" element={<RewritesPage />} />
+          <Route path="/keywords" element={<KeywordsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

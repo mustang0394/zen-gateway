@@ -32,11 +32,15 @@ func TestUpgradeFromOldSchema(t *testing.T) {
 		t.Fatalf("set setting: %v", err)
 	}
 	// 模拟旧库：删掉 rewrite_rules 表并回退 schema 版本号到该表之前
-	migrationsBeforeRewrite := len(migrations) - 2 // 建表 + 索引两条
-	if _, err := old.db.Exec(`DROP TABLE IF EXISTS rewrite_rules`); err != nil {
+	// 新模型共 3 条迁移：inject_keywords 表 + 索引 + prompt_overrides 表
+	migrationsBeforeNewTables := len(migrations) - 3
+	if _, err := old.db.Exec(`DROP TABLE IF EXISTS inject_keywords`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
-	if _, err := old.db.Exec(`DELETE FROM schema_migrations WHERE version > ?`, migrationsBeforeRewrite); err != nil {
+	if _, err := old.db.Exec(`DROP TABLE IF EXISTS prompt_overrides`); err != nil {
+		t.Fatalf("drop overrides: %v", err)
+	}
+	if _, err := old.db.Exec(`DELETE FROM schema_migrations WHERE version > ?`, migrationsBeforeNewTables); err != nil {
 		t.Fatalf("rollback version: %v", err)
 	}
 	if err := old.Close(); err != nil {
@@ -51,10 +55,13 @@ func TestUpgradeFromOldSchema(t *testing.T) {
 	defer up.Close()
 
 	// 新表可用
-	if _, err := up.CreateRewriteRule(RewriteRule{
-		Module: "zen", Name: "升级后新增", Match: "A", Replace: "B", Enabled: true,
+	if _, err := up.CreateKeyword(Keyword{
+		Module: "zen", Keyword: "Claude Code", Note: "升级后新增", Enabled: true,
 	}); err != nil {
-		t.Fatalf("rewrite_rules table not created by migration: %v", err)
+		t.Fatalf("inject_keywords table not created by migration: %v", err)
+	}
+	if err := up.SetPromptOverride("zen", "custom prompt"); err != nil {
+		t.Fatalf("prompt_overrides table not created by migration: %v", err)
 	}
 
 	// 旧数据完好
@@ -91,11 +98,14 @@ func TestUpgradeFromOldSchema(t *testing.T) {
 		t.Fatalf("second upgrade open: %v", err)
 	}
 	defer again.Close()
-	rules, err := again.ListRewriteRules("")
+	keywords, err := again.ListKeywords("")
 	if err != nil {
-		t.Fatalf("list rules after re-upgrade: %v", err)
+		t.Fatalf("list keywords after re-upgrade: %v", err)
 	}
-	if len(rules) != 1 {
-		t.Errorf("expected the rule to survive, got %d", len(rules))
+	if len(keywords) != 1 {
+		t.Errorf("expected the keyword to survive, got %d", len(keywords))
+	}
+	if txt, _ := again.PromptOverride("zen"); txt != "custom prompt" {
+		t.Errorf("expected the prompt override to survive, got %q", txt)
 	}
 }

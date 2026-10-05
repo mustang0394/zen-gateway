@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"zengateway/internal/cooldown"
-	"zengateway/internal/rewrite"
+	"zengateway/internal/inject"
 	"zengateway/internal/store"
 	"zengateway/internal/version"
 )
@@ -30,8 +30,8 @@ func newServer(t *testing.T) (*Server, *store.Store) {
 	log := slog.New(slog.DiscardHandler)
 	vers := version.New(st, log, version.DefaultTargets())
 	cool := cooldown.New(st, log)
-	rw := rewrite.New(st, log)
-	srv := New(st, vers, cool, rw, log, testToken, "https://zen.example/v1", "https://cline.example/api")
+	inj := inject.New(st, log)
+	srv := New(st, vers, cool, inj, log, testToken, "https://zen.example/v1", "https://cline.example/api")
 	if srv == nil {
 		t.Fatal("server must not be nil when token configured")
 	}

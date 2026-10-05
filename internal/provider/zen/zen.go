@@ -21,8 +21,8 @@ import (
 	"time"
 
 	"zengateway/internal/idgen"
+	"zengateway/internal/inject"
 	"zengateway/internal/provider"
-	"zengateway/internal/rewrite"
 	"zengateway/internal/store"
 )
 
@@ -52,16 +52,16 @@ var requiredTools = []string{"bash", "read"}
 // Provider 实现 provider.Provider。
 type Provider struct {
 	upstream string
-	// rw 是系统提示词改写引擎；为 nil 时跳过改写。
-	rw *rewrite.Engine
+	// inj 是系统提示词注入引擎；为 nil 时跳过注入。
+	inj *inject.Engine
 }
 
-// New 创建 zen 模块；upstreamBase 为空时使用默认上游，rw 为 nil 表示不改写。
-func New(upstreamBase string, rw *rewrite.Engine) *Provider {
+// New 创建 zen 模块；upstreamBase 为空时使用默认上游，inj 为 nil 表示不注入。
+func New(upstreamBase string, inj *inject.Engine) *Provider {
 	if strings.TrimSpace(upstreamBase) == "" {
 		upstreamBase = DefaultUpstream
 	}
-	return &Provider{upstream: strings.TrimRight(upstreamBase, "/"), rw: rw}
+	return &Provider{upstream: strings.TrimRight(upstreamBase, "/"), inj: inj}
 }
 
 func (p *Provider) Name() string         { return "zen" }
@@ -80,10 +80,9 @@ func (p *Provider) PathFor(kind provider.Kind) string {
 	}
 }
 
-// PrepareBody 改写下游文本（按提示词规则）、强制流式并补齐必需工具。
+// PrepareBody 按关键词注入原生系统提示词、强制流式并补齐必需工具。
 //
-// 顺序很关键：先按规则改写下游带来的文本，再注入 bash/read stub，
-// 这样我们注入的 description 永远不会被用户规则误改。
+// 顺序很关键：先做提示词注入（基于下游原始内容判断），再注入 bash/read stub。
 //
 // body 为 nil 时直接返回：本方法会写入 body（stream/tools），
 // 在 nil map 上写入会 panic，因此即便调用方已做防护，这里仍显式拦住。
@@ -93,8 +92,8 @@ func (p *Provider) PrepareBody(kind provider.Kind, body map[string]any) bool {
 	}
 	changed := false
 
-	if p.rw != nil {
-		if res := p.rw.Apply(p.Name(), string(kind), body); res.Total > 0 {
+	if p.inj != nil {
+		if res := p.inj.Apply(p.Name(), string(kind), body); res.Injected {
 			changed = true
 		}
 	}

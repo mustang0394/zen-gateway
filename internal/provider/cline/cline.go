@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
+	"zengateway/internal/inject"
 	"zengateway/internal/provider"
-	"zengateway/internal/rewrite"
 	"zengateway/internal/store"
 )
 
@@ -46,12 +46,12 @@ type Provider struct {
 	upstream string
 	// fallbackCooldown 是 429 错误文本无法解析时的兜底冷却时长。
 	fallbackCooldown time.Duration
-	// rw 是系统提示词改写引擎；为 nil 时跳过改写。
-	rw *rewrite.Engine
+	// inj 是系统提示词注入引擎；为 nil 时跳过注入。
+	inj *inject.Engine
 }
 
-// New 创建 cline 模块。fallback 为 429 解析失败时的兜底冷却，rw 为 nil 表示不改写。
-func New(upstreamBase string, fallback time.Duration, rw *rewrite.Engine) *Provider {
+// New 创建 cline 模块。fallback 为 429 解析失败时的兜底冷却，inj 为 nil 表示不注入。
+func New(upstreamBase string, fallback time.Duration, inj *inject.Engine) *Provider {
 	if strings.TrimSpace(upstreamBase) == "" {
 		upstreamBase = DefaultUpstream
 	}
@@ -61,7 +61,7 @@ func New(upstreamBase string, fallback time.Duration, rw *rewrite.Engine) *Provi
 	return &Provider{
 		upstream:         strings.TrimRight(upstreamBase, "/"),
 		fallbackCooldown: fallback,
-		rw:               rw,
+		inj:              inj,
 	}
 }
 
@@ -81,13 +81,13 @@ func (p *Provider) PathFor(kind provider.Kind) string {
 	}
 }
 
-// PrepareBody 按提示词规则改写请求体文本；cline 不改动 stream 与其他字段。
+// PrepareBody 按关键词注入原生系统提示词；cline 不改动 stream 与其他字段。
+// 当前 cline 尚无内置原生提示词，未配置覆盖时命中不会改写（保持原样）。
 func (p *Provider) PrepareBody(kind provider.Kind, body map[string]any) bool {
-	if p.rw == nil || body == nil {
+	if p.inj == nil || body == nil {
 		return false
 	}
-	res := p.rw.Apply(p.Name(), string(kind), body)
-	return res.Total > 0
+	return p.inj.Apply(p.Name(), string(kind), body).Injected
 }
 
 // BuildHeaders 完全忽略下游请求头，只构造固定的 Cline 产品头。

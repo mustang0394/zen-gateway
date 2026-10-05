@@ -39,10 +39,10 @@ import (
 
 	"zengateway/internal/config"
 	"zengateway/internal/cooldown"
+	"zengateway/internal/inject"
 	"zengateway/internal/provider"
 	"zengateway/internal/provider/cline"
 	"zengateway/internal/provider/zen"
-	"zengateway/internal/rewrite"
 	"zengateway/internal/router"
 	"zengateway/internal/store"
 	"zengateway/internal/version"
@@ -88,23 +88,23 @@ func main() {
 	cool := cooldown.New(st, log)
 	cool.Run(ctx, cfg.RetentionDays)
 
-	// 4) 系统提示词改写引擎（规则存于 SQLite，内存快照热重载）
-	rw := rewrite.New(st, log)
-	rw.StartPeriodicReload(ctx, rewrite.DefaultReloadInterval)
+	// 4) 系统提示词注入引擎（关键词与提示词覆盖存于 SQLite，内存快照热重载）
+	inj := inject.New(st, log)
+	inj.StartPeriodicReload(ctx, inject.DefaultReloadInterval)
 
 	// 5) 模块
 	versionsFn := func() provider.Versions {
 		return provider.Versions{Zen: vers.Zen(), ClineCLI: vers.ClineCLI(), ClineSDK: vers.ClineSDK()}
 	}
-	zenHandler := provider.NewHandler(zen.New(cfg.ZenUpstream, rw), provider.Runtime{
+	zenHandler := provider.NewHandler(zen.New(cfg.ZenUpstream, inj), provider.Runtime{
 		Store: st, Log: log, Versions: versionsFn,
 	})
-	clineHandler := provider.NewHandler(cline.New(cfg.ClineUpstream, cfg.ClineCooldownFallback, rw), provider.Runtime{
+	clineHandler := provider.NewHandler(cline.New(cfg.ClineUpstream, cfg.ClineCooldownFallback, inj), provider.Runtime{
 		Store: st, Log: log, Versions: versionsFn,
 	})
 
 	// 6) 管理端（需 ZEN_ADMIN_TOKEN）
-	admin := web.New(st, vers, cool, rw, log, cfg.AdminToken, cfg.ZenUpstream, cfg.ClineUpstream)
+	admin := web.New(st, vers, cool, inj, log, cfg.AdminToken, cfg.ZenUpstream, cfg.ClineUpstream)
 	if admin == nil {
 		log.Warn("admin UI disabled: set ZEN_ADMIN_TOKEN to enable /admin")
 	}

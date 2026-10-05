@@ -100,53 +100,43 @@ export interface StatsResponse {
   days: string[] | null;
 }
 
-export type RewriteScope = "system" | "system_first_user" | "messages";
-
-export interface RewriteRule {
-  ID: number;
-  Module: Module | "*";
-  Name: string;
-  Match: string;
-  Replace: string;
-  IsRegex: boolean;
-  CaseSensitive: boolean;
-  Scope: RewriteScope;
-  IncludeTools: boolean;
-  Enabled: boolean;
-  SortOrder: number;
-  Hits: number;
-  CreatedAt: string;
-  UpdatedAt: string;
-  compileError: string;
+export interface Keyword {
+  id: number;
+  module: "zen" | "cline" | "*";
+  keyword: string;
+  note: string;
+  enabled: boolean;
+  sortOrder: number;
+  hits: number;
+  createdAt: string;
+  updatedAt: string;
+  isGlobal: boolean;
 }
 
-export interface RewriteRuleList {
-  rules: RewriteRule[];
-  scopes: { value: RewriteScope; label: string }[];
+export interface KeywordList {
+  keywords: Keyword[];
   modules: { value: string; label: string }[];
   note: string;
 }
 
-/** 提交给后端的规则字段（小写；响应中的规则用大写字段名）。 */
-export interface RewriteRuleInput {
-  module?: string;
-  name?: string;
-  match?: string;
-  replace?: string;
-  isRegex?: boolean;
-  caseSensitive?: boolean;
-  scope?: RewriteScope;
-  includeTools?: boolean;
-  enabled?: boolean;
-  /** 排序用，提交时忽略 */
-  ids?: number[];
+export interface KeywordTestResult {
+  input: string;
+  hit: boolean;
+  matchedKeyword?: string;
+  ruleId?: number;
+  ruleNote?: string;
+  promptSource: "builtin" | "override" | "none";
+  promptLength: number;
+  hasPrompt: boolean;
 }
 
-export interface RewritePreview {
-  input: string;
-  result: string;
-  hits: { ruleId: number; name: string; count: number }[];
-  changed: boolean;
+export interface PromptInfo {
+  module: string;
+  effective: string;
+  builtin: string;
+  override: string;
+  source: "builtin" | "override" | "none";
+  hasBuiltin: boolean;
 }
 
 export interface Settings {
@@ -262,22 +252,29 @@ export const api = {
   releaseCooldown: (id: number) =>
     request<{ ok: boolean }>(`/cooldowns/${id}`, { method: "DELETE" }),
 
-  rewrites: (m?: Module | "*") =>
-    request<RewriteRuleList>(`/rewrites${m ? `?module=${m}` : ""}`),
-  createRewrite: (body: RewriteRuleInput & { match: string; replace: string; module: string }) =>
-    request<{ rule: RewriteRule }>("/rewrites", { method: "POST", body: JSON.stringify(body) }),
-  updateRewrite: (id: number, body: RewriteRuleInput) =>
-    request<{ rule: RewriteRule }>(`/rewrites/${id}`, { method: "PUT", body: JSON.stringify(body) }),
-  deleteRewrite: (id: number) =>
-    request<{ ok: boolean }>(`/rewrites/${id}`, { method: "DELETE" }),
-  reorderRewrites: (ids: number[]) =>
-    request<{ ok: boolean }>("/rewrites/reorder", { method: "POST", body: JSON.stringify({ ids }) }),
-  resetRewriteHits: (id: number) =>
-    request<{ ok: boolean }>(`/rewrites/${id}/reset-hits`, { method: "POST" }),
-  previewRewrite: (module: Module, text: string) =>
-    request<RewritePreview>("/rewrites/preview", {
+  keywords: (m?: Module | "*") => request<KeywordList>(`/keywords${m ? `?module=${m}` : ""}`),
+  createKeyword: (body: { module: string; keyword: string; note?: string; enabled?: boolean }) =>
+    request<{ keyword: Keyword }>("/keywords", { method: "POST", body: JSON.stringify(body) }),
+  updateKeyword: (
+    id: number,
+    body: { module?: string; keyword?: string; note?: string; enabled?: boolean },
+  ) => request<{ keyword: Keyword }>(`/keywords/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteKeyword: (id: number) => request<{ ok: boolean }>(`/keywords/${id}`, { method: "DELETE" }),
+  reorderKeywords: (ids: number[]) =>
+    request<{ ok: boolean }>("/keywords/reorder", { method: "POST", body: JSON.stringify({ ids }) }),
+  resetKeywordHits: (id: number) =>
+    request<{ ok: boolean }>(`/keywords/${id}/reset-hits`, { method: "POST" }),
+  testKeyword: (module: Module, text: string) =>
+    request<KeywordTestResult>("/keywords/test", {
       method: "POST",
       body: JSON.stringify({ module, text }),
+    }),
+
+  prompt: (m: Module) => request<PromptInfo>(`/prompts?module=${m}`),
+  savePrompt: (m: Module, text: string) =>
+    request<{ ok: boolean; source: string }>("/prompts", {
+      method: "PUT",
+      body: JSON.stringify({ module: m, text }),
     }),
 
   stats: (day?: string, m?: Module) => {

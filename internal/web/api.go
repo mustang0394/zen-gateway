@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"zengateway/internal/cooldown"
-	"zengateway/internal/rewrite"
+	"zengateway/internal/inject"
 	"zengateway/internal/store"
 	"zengateway/internal/upstream"
 	"zengateway/internal/version"
@@ -41,7 +41,7 @@ type Server struct {
 	store  *store.Store
 	vers   *version.Manager
 	cool   *cooldown.Service
-	rw     *rewrite.Engine
+	inj    *inject.Engine
 	log    *slog.Logger
 	token  string
 	zenUp  string
@@ -52,7 +52,7 @@ type Server struct {
 }
 
 // New 创建管理端。token 为空时返回 nil（调用方据此禁用管理端）。
-func New(st *store.Store, vers *version.Manager, cool *cooldown.Service, rw *rewrite.Engine,
+func New(st *store.Store, vers *version.Manager, cool *cooldown.Service, inj *inject.Engine,
 	log *slog.Logger, token, zenUpstream, clineUpstream string) *Server {
 
 	if strings.TrimSpace(token) == "" {
@@ -62,7 +62,7 @@ func New(st *store.Store, vers *version.Manager, cool *cooldown.Service, rw *rew
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Server{
-		store: st, vers: vers, cool: cool, rw: rw, log: log,
+		store: st, vers: vers, cool: cool, inj: inj, log: log,
 		token: token, zenUp: zenUpstream, clinUp: clineUpstream,
 		sessions: map[string]time.Time{},
 	}
@@ -192,16 +192,19 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 1 && parts[0] == "stats":
 		s.handleStats(w, r)
 
-	case len(parts) == 1 && parts[0] == "rewrites":
-		s.handleRewrites(w, r)
-	case len(parts) == 2 && parts[0] == "rewrites" && parts[1] == "preview":
-		s.handleRewritePreview(w, r)
-	case len(parts) == 2 && parts[0] == "rewrites" && parts[1] == "reorder":
-		s.handleRewriteReorder(w, r)
-	case len(parts) == 2 && parts[0] == "rewrites":
-		s.handleRewriteItem(w, r, parts[1])
-	case len(parts) == 3 && parts[0] == "rewrites" && parts[2] == "reset-hits":
-		s.handleRewriteResetHits(w, r, parts[1])
+	case len(parts) == 1 && parts[0] == "keywords":
+		s.handleKeywords(w, r)
+	case len(parts) == 2 && parts[0] == "keywords" && parts[1] == "test":
+		s.handleKeywordTest(w, r)
+	case len(parts) == 2 && parts[0] == "keywords" && parts[1] == "reorder":
+		s.handleKeywordReorder(w, r)
+	case len(parts) == 2 && parts[0] == "keywords":
+		s.handleKeywordItem(w, r, parts[1])
+	case len(parts) == 3 && parts[0] == "keywords" && parts[2] == "reset-hits":
+		s.handleKeywordResetHits(w, r, parts[1])
+
+	case len(parts) == 1 && parts[0] == "prompts":
+		s.handlePromptOverrides(w, r)
 
 	case len(parts) >= 2 && parts[1] == "keys":
 		module := parts[0]
