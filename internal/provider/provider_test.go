@@ -208,6 +208,69 @@ func TestZenBuildHeadersRewriteAndDefaults(t *testing.T) {
 	}
 }
 
+// TestZenAuthorizationIsNeverDownstreamValue 锁定下游 Authorization 不得透传给上游。
+//
+// 下游的 Authorization 是网关自己的接入 Token（或客户端随手带的值），
+// 与上游凭据无关。早期实现会优先沿用它，导致配置接入 Token 后
+// 网关 Token 被当作上游 key 发送，上游一律回 401 Invalid API key。
+func TestZenAuthorizationIsNeverDownstreamValue(t *testing.T) {
+	cases := []struct {
+		name     string
+		down     string // 下游 Authorization（空表示不带）
+		key      store.APIKey
+		wantAuth string
+	}{
+		{
+			name:     "配了池中 key 且下游带接入 Token：必须用池中 key",
+			down:     "Bearer my-gateway-token",
+			key:      store.APIKey{APIKey: "sk-upstream", IsAnonymous: false},
+			wantAuth: "Bearer sk-upstream",
+		},
+		{
+			name:     "匿名 key 且下游带接入 Token：必须回落 public，不得泄露网关 Token",
+			down:     "Bearer my-gateway-token",
+			key:      store.APIKey{APIKey: "public", IsAnonymous: true},
+			wantAuth: "Bearer public",
+		},
+		{
+			name:     "匿名 key 且下游带任意值：仍回落 public",
+			down:     "Bearer some-other-token",
+			key:      store.APIKey{APIKey: "public", IsAnonymous: true},
+			wantAuth: "Bearer public",
+		},
+		{
+			name:     "无 key 且下游不带：回落 public",
+			down:     "",
+			key:      store.APIKey{},
+			wantAuth: "Bearer public",
+		},
+		{
+			name:     "池中 key 为空字符串：回落 public",
+			down:     "Bearer my-gateway-token",
+			key:      store.APIKey{APIKey: "", IsAnonymous: false},
+			wantAuth: "Bearer public",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			down := http.Header{}
+			if tc.down != "" {
+				down.Set("Authorization", tc.down)
+			}
+			h := zen.New("", nil).BuildHeaders(down, tc.key, provider.Versions{Zen: "1.18.31"})
+
+			if got := h.Get("Authorization"); got != tc.wantAuth {
+				t.Errorf("Authorization = %q, want %q", got, tc.wantAuth)
+			}
+			// 下游值（可能是网关自身接入 Token）绝不得出现在发送给上游的头里
+			if tc.down != "" && h.Get("Authorization") == tc.down {
+				t.Errorf("downstream Authorization leaked upstream: %q", tc.down)
+			}
+		})
+	}
+}
+
 func TestZenPrepareBodyForcesStreamAndTools(t *testing.T) {
 	p := zen.New("", nil)
 	body := map[string]any{"model": "m", "stream": false}
@@ -636,7 +699,10 @@ func TestResponsesPathBothModules(t *testing.T) {
 }
 
 func TestModelsEndpointUsesKeyAndPath(t *testing.T) {
-	fake := newFakeUpstream(t, scripted{status: 200, body: `{"object":"list","data":[]}`})
+	fake := newFakeUpstream(t, scripted{status: 200, body: `{"free":[
+		{"id":"cline-free/mimo-v2.6-flash","name":"Mimo V2.6 Flash","description":"MoE","tags":[]},
+		{"id":"stealth/space-bunny-alpha","name":"space-bunny-alpha","description":"fast","tags":[]}
+	]}`})
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-1", Enabled: true})
 	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
@@ -647,14 +713,153 @@ func TestModelsEndpointUsesKeyAndPath(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != 200 {
-		t.Fatalf("status = %d", rec.Code)
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
+	// cline 没有 OpenAI 风格的 /v1/models，必须改打官方 recommended-models
 	calls := fake.calls()
-	if len(calls) != 1 || calls[0].Path != "/models" || calls[0].Method != http.MethodGet {
+	if len(calls) != 1 || calls[0].Path != "/ai/cline/recommended-models" || calls[0].Method != http.MethodGet {
 		t.Fatalf("unexpected upstream call: %+v", calls)
 	}
 	if got := calls[0].Header.Get("X-CLIENT-VERSION"); got != "4.1.22" {
 		t.Errorf("cline models request must carry version headers, got %q", got)
+	}
+	// 必须用池中配置的 key（而非一律用匿名占位）：key 还决定了 clientFor 选哪个代理。
+	if got := calls[0].Header.Get("Authorization"); got != "Bearer sk-1" {
+		t.Errorf("cline models must use the configured key, got %q", got)
+	}
+
+	// 响应必须已转换为 OpenAI /v1/models 格式，且只含 free 桶
+	var out struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			OwnedBy string `json:"owned_by"`
+			Name    string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("response is not JSON: %v\n%s", err, rec.Body.String())
+	}
+	if out.Object != "list" {
+		t.Errorf("object = %q, want list", out.Object)
+	}
+	if len(out.Data) != 2 {
+		t.Fatalf("data = %+v, want 2 free models", out.Data)
+	}
+	if out.Data[0].ID != "cline-free/mimo-v2.6-flash" || out.Data[0].Object != "model" ||
+		out.Data[0].OwnedBy != "cline-free" || out.Data[0].Created <= 0 || out.Data[0].Name != "Mimo V2.6 Flash" {
+		t.Errorf("entry not in OpenAI shape: %+v", out.Data[0])
+	}
+	if out.Data[1].OwnedBy != "stealth" {
+		t.Errorf("owned_by = %q, want stealth", out.Data[1].OwnedBy)
+	}
+}
+
+// /cline/v1/models 无需 key：官方 recommended-models 公开可读，
+// 因此尚未配置 key（或 key 已全冷却）时也应能查看模型列表，而不是 503。
+func TestModelsEndpointWorksWithoutKey(t *testing.T) {
+	fake := newFakeUpstream(t, scripted{status: 200,
+		body: `{"free":[{"id":"cline-free/mimo-v2.6-flash","name":"Mimo","description":"","tags":[]}]}`})
+	st := newStore(t) // 故意不创建任何 key
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
+
+	req := httptest.NewRequest(http.MethodGet, "/cline/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer gw-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s (want 200: models must work without a key)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cline-free/mimo-v2.6-flash") {
+		t.Errorf("body = %s", rec.Body.String())
+	}
+	// 匿名占位 key 仍应带上 Cline 产品头
+	calls := fake.calls()
+	if len(calls) != 1 || calls[0].Header.Get("X-CLIENT-TYPE") != "cline-cli" {
+		t.Errorf("anonymous models request must still carry Cline headers: %+v", calls)
+	}
+	// 无 key 时应回落到 public，而不能把下游的网关 Token 泄露给上游
+	if got := calls[0].Header.Get("Authorization"); got != "Bearer public" {
+		t.Errorf("anonymous models request must use Bearer public, got %q", got)
+	}
+}
+
+// 非 2xx 必须原样透传，让下游看到上游真实错误，而不是被包装成 200 空列表。
+func TestModelsEndpointPassesThroughUpstreamError(t *testing.T) {
+	fake := newFakeUpstream(t, scripted{status: 503, body: `{"error":"upstream down"}`})
+	st := newStore(t)
+	st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-1", Enabled: true})
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
+
+	req := httptest.NewRequest(http.MethodGet, "/cline/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer gw-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 503 {
+		t.Fatalf("status = %d, want 503 passthrough", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "upstream down") {
+		t.Errorf("upstream error body lost: %s", rec.Body.String())
+	}
+}
+
+// 上游返回 2xx 但不是合法 recommended-models JSON 时必须报错，
+// 不能静默返回空列表把故障掩盖成"没有模型"。
+func TestModelsEndpointRejectsMalformedUpstreamBody(t *testing.T) {
+	fake := newFakeUpstream(t, scripted{status: 200, body: `<html>not json</html>`})
+	st := newStore(t)
+	st.CreateKey(store.APIKey{Module: "cline", APIKey: "sk-1", Enabled: true})
+	h := newHandler(t, cline.New(fake.srv.URL, time.Hour, nil), st)
+
+	req := httptest.NewRequest(http.MethodGet, "/cline/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer gw-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "convert models response") {
+		t.Errorf("body = %s", rec.Body.String())
+	}
+	// 上游 200 但转换失败时，统计必须与下游实际收到的 502 一致，
+	// 否则故障在日志/统计里会被掩盖成一次成功请求。
+	if err := st.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	sum, err := st.SummaryFor(time.Now().Format(store.DayLayout), "cline")
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if sum.Requests != 1 || sum.Errors != 1 {
+		t.Errorf("stats = %+v, want requests=1 errors=1 (conversion failure)", sum)
+	}
+}
+
+// zen 未实现 ModelsProvider，必须保持原来的直通行为（路径与响应均不变）。
+func TestZenModelsEndpointStillPassesThrough(t *testing.T) {
+	raw := `{"object":"list","data":[{"id":"mimo-v2.5-free","object":"model","created":1,"owned_by":"opencode"}]}`
+	fake := newFakeUpstream(t, scripted{status: 200, body: raw})
+	st := newStore(t)
+	h := newHandler(t, zen.New(fake.srv.URL, nil), st)
+
+	req := httptest.NewRequest(http.MethodGet, "/zen/v1/models", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	calls := fake.calls()
+	if len(calls) != 1 || calls[0].Path != "/models" {
+		t.Fatalf("zen models must still hit /models: %+v", calls)
+	}
+	if rec.Body.String() != raw {
+		t.Errorf("zen models must pass through untouched:\n got %s\nwant %s", rec.Body.String(), raw)
 	}
 }
 

@@ -98,17 +98,54 @@ print(resp.choices[0].message.content)
 | `GET  /zen/v1/models` | `/models` | zen 模型列表 |
 | `POST /cline/v1/chat/completions` | `/chat/completions` | cline chat 风格模型 |
 | `POST /cline/v1/responses` | `/responses` | cline responses 风格模型 |
-| `GET  /cline/v1/models` | `/models` | cline 模型列表 |
+| `GET  /cline/v1/models` | `/ai/cline/recommended-models` | cline 免费模型列表（见下） |
 | `GET  /admin` | — | Web 管理端 |
 | `GET  /healthz` | — | 健康检查 |
 
 路径中的 `/v1` 可省略（`/zen/chat/completions` 等价）。
+
+### cline 的模型列表
+
+上游没有 OpenAI 风格的模型清单接口，官方的模型接口是
+`/ai/cline/recommended-models`（返回 `recommended` / `free` / `clinePass` /
+`clineCloud` 四个桶）。网关因此实现了一层兼容：
+
+- 请求该官方接口，**只取 `free` 桶**
+- 转换为 OpenAI `/v1/models` 格式后返回，可直接被 OpenAI SDK / 客户端解析
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "cline-free/mimo-v2.6-flash",
+      "object": "model",
+      "created": 1791213022,
+      "owned_by": "cline-free",
+      "name": "Mimo V2.6 Flash",
+      "description": "Mixture-of-Experts architecture with 309B total parameters"
+    }
+  ]
+}
+```
+
+`id` / `object` / `created` / `owned_by` 为 OpenAI 标准字段（`owned_by` 取模型
+ID 的命名空间前缀，与官方 `/v1/models` 惯例一致）；`name` 与 `description` 是附加
+字段，OpenAI 客户端会自动忽略，保留它们便于辨识模型。
+
+不直接透传上游的 `/models`，原因有二：它是**全量**清单（实测 466 个，含付费
+模型）而网关只能免费转发 free 桶；且它**反而缺少**部分 free 模型（实测缺
+`cline-free/mimo-v2.6-flash` 等）。
+
+该端点**无需配置上游 Key** 即可访问（官方接口公开可读），便于在配置 Key 前
+先查看可用模型；上游返回非 2xx 时原样透传错误。
 
 **下游鉴权**：两个模块各有一枚接入 Token（在 Web 「设置」中配置），客户端用
 `Authorization: Bearer <token>` 携带。
 
 - `zen`：Token 留空时允许**匿名**访问（上游 Key 填 `public` 即可，上游按 IP 限流）
 - `cline`：上游不支持匿名，必须配置有效 Key；建议同时配置接入 Token
+  （chat / responses 均如此；仅 `/cline/v1/models` 例外，见上文）
 
 ## Web 管理端
 

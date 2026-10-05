@@ -13,6 +13,7 @@ package provider
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -78,6 +79,18 @@ type Provider interface {
 	ModelOf(body map[string]any) string
 	// Classify 依据状态码与响应体决定处置动作。
 	Classify(status int, body []byte) Decision
+}
+
+// ModelsProvider 是可选接口：模块可自定义 models 端点的上游来源与响应格式。
+//
+// 未实现的模块（如 zen）保持默认行为：直接透传 UpstreamBase()+PathFor(KindModels)
+// 的原始响应。实现的模块（如 cline）由 ConvertModels 把上游响应改写为 OpenAI
+// /v1/models 格式——因为上游未必存在 OpenAI 风格的模型清单接口。
+type ModelsProvider interface {
+	// ModelsUpstreamPath 返回 models 端点实际请求的上游路径（替代 PathFor(KindModels)）。
+	ModelsUpstreamPath() string
+	// ConvertModels 把上游响应体转换为 OpenAI /v1/models 格式。
+	ConvertModels(body []byte) ([]byte, error)
 }
 
 // Runtime 提供骨架所需的运行时依赖（由 main 装配）。
@@ -157,11 +170,19 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 		return
 	}
+	// 模块可自定义 models 来源：cline 改为请求官方 recommended-models 并转成 OpenAI 格式。
+	mp, custom := h.P.(ModelsProvider)
+
 	key, err := h.pickKey("")
 	if err != nil {
-		writeJSONError(w, http.StatusServiceUnavailable,
-			"no upstream key available for module "+h.P.Name(), "server_error")
-		return
+		// 自定义来源无需鉴权也能读取（上游该接口公开），因此池中无可用 key 时
+		// 仍以匿名占位 key 发请求，避免尚未配置 key 时无法查看模型列表。
+		if !custom || !errors.Is(err, store.ErrNotFound) {
+			writeJSONError(w, http.StatusServiceUnavailable,
+				"no upstream key available for module "+h.P.Name(), "server_error")
+			return
+		}
+		key = store.APIKey{Module: h.P.Name(), Label: "anonymous", APIKey: "public", IsAnonymous: true, Enabled: true}
 	}
 	start := time.Now()
 	client, err := clientFor(key)
@@ -169,8 +190,12 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "proxy client: "+err.Error(), "server_error")
 		return
 	}
+	path := h.P.PathFor(KindModels)
+	if custom {
+		path = mp.ModelsUpstreamPath()
+	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
-		h.P.UpstreamBase()+h.P.PathFor(KindModels), nil)
+		h.P.UpstreamBase()+path, nil)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
@@ -184,8 +209,33 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	// models 列表不含 token 用量，仅记录请求数与耗时
-	h.recordRequest(h.P.Name(), "", key.ID, resp.StatusCode, start, stats.Result{}, false)
+	// models 列表不含 token 用量，仅记录请求数与耗时。
+	// 记账状态与写给下游的一致：转换失败时下游得到 502，统计也应记 502
+	// 而非上游的 200，否则日志与统计会掩盖真实的转换故障。
+	status := resp.StatusCode
+	defer func() {
+		h.recordRequest(h.P.Name(), "", key.ID, status, start, stats.Result{}, false)
+	}()
+
+	// 自定义来源：2xx 时改写为 OpenAI 格式；非 2xx 保持原样透传以便下游看到真实错误。
+	if custom && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes))
+		if err != nil {
+			status = http.StatusBadGateway
+			writeJSONError(w, http.StatusBadGateway, "read models response: "+err.Error(), "server_error")
+			return
+		}
+		out, err := mp.ConvertModels(body)
+		if err != nil {
+			status = http.StatusBadGateway
+			writeJSONError(w, http.StatusBadGateway, "convert models response: "+err.Error(), "server_error")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(out)
+		return
+	}
 	copyResponse(w, resp.Body, resp.StatusCode, resp.Header)
 }
 

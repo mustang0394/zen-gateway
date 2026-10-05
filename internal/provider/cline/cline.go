@@ -13,11 +13,18 @@
 //
 // 另外，上游对旧版本客户端会返回 403 与 "only available via Cline product surfaces"
 // 提示，这里对这类响应固定重试 3 次；仍失败则原样返回给下游。
+//
+// 上游也没有 OpenAI 风格的 /v1/models（官方模型清单接口是
+// /ai/cline/recommended-models），因此本模块实现 provider.ModelsProvider：
+// models 端点改请求该接口，并把其中的 free 桶转换为 OpenAI /v1/models 格式。
 package cline
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +57,11 @@ type Provider struct {
 	inj *inject.Engine
 }
 
+// ModelsProvider 的两个方法都是可选的（靠类型断言生效），方法名一旦写错或
+// 改名不会导致编译失败，而是静默退回已被废弃的 PathFor(KindModels)。
+// 这行断言把这种退化提前到编译期。
+var _ provider.ModelsProvider = (*Provider)(nil)
+
 // New 创建 cline 模块。fallback 为 429 解析失败时的兜底冷却，inj 为 nil 表示不注入。
 func New(upstreamBase string, fallback time.Duration, inj *inject.Engine) *Provider {
 	if strings.TrimSpace(upstreamBase) == "" {
@@ -70,6 +82,10 @@ func (p *Provider) UpstreamBase() string { return p.upstream }
 func (p *Provider) RequireKey() bool     { return true } // 不支持匿名
 
 // PathFor 返回上游业务路径（/v1 已包含在基址中，与 zen 保持一致）。
+//
+// 注意：KindModels 不会用到这里的 "/models"——本模块实现了
+// provider.ModelsProvider，models 端点由 ModelsUpstreamPath 接管。
+// 保留该分支仅为接口完整性。
 func (p *Provider) PathFor(kind provider.Kind) string {
 	switch kind {
 	case provider.KindResponses:
@@ -112,6 +128,100 @@ func (p *Provider) BuildHeaders(_ http.Header, key store.APIKey, v provider.Vers
 func (p *Provider) ModelOf(body map[string]any) string {
 	m, _ := body["model"].(string)
 	return strings.TrimSpace(m)
+}
+
+// ModelsUpstreamPath 返回 models 端点的上游路径（provider.ModelsProvider）。
+// 官方没有 OpenAI 风格的 /v1/models，模型清单实际来自 recommended-models。
+func (p *Provider) ModelsUpstreamPath() string { return "/ai/cline/recommended-models" }
+
+// recommendedModel 是 free 桶中的一项。
+//
+// 上游该项还有一个 tags 数组，网关用不到，因此故意不声明——避免上游改动
+// 该字段类型时把整个端点拖挂（encoding/json 会因类型不符而解码失败）。
+type recommendedModel struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// modelList 与 modelItem 是 OpenAI /v1/models 的响应结构。
+// name / description 为附加字段：OpenAI 客户端会忽略未知字段，
+// 保留它们便于管理端与用户看清模型含义。
+type modelList struct {
+	Object string      `json:"object"`
+	Data   []modelItem `json:"data"`
+}
+
+type modelItem struct {
+	ID          string `json:"id"`
+	Object      string `json:"object"`
+	Created     int64  `json:"created"`
+	OwnedBy     string `json:"owned_by"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// ConvertModels 把官方 recommended-models 响应中的 free 桶改写为 OpenAI /v1/models 格式。
+//
+// 不直接透传上游 /v1/models，原因有二：
+//   - 它是全量清单（实测 466 个，含付费模型），而网关只免费转发 free 桶
+//   - 它反而缺少部分 free 模型（实测缺 cline-free/mimo-v2.6-flash 等）
+//
+// created 取转换时刻：官方清单不含时间戳，无法还原真实创建时间。
+func (p *Provider) ConvertModels(body []byte) ([]byte, error) {
+	// 先用原始字段探测 free 桶是否存在。该接口固定返回 recommended / free /
+	// clinePass / clineCloud 四个桶，缺失 free 几乎总是上游 schema 漂移（或返回了
+	// 错误对象），此时报错——否则下游只会看到"没有模型"，难以定位。
+	// 显式的 `"free": []` 与 `"free": null` 仍视为合法的空列表。
+	var buckets map[string]json.RawMessage
+	if err := json.Unmarshal(body, &buckets); err != nil {
+		return nil, fmt.Errorf("parse recommended-models: %w", err)
+	}
+	freeRaw, ok := buckets["free"]
+	if !ok {
+		return nil, fmt.Errorf("recommended-models response has no free bucket (present: %s)", joinKeys(buckets))
+	}
+	var free []recommendedModel
+	if err := json.Unmarshal(freeRaw, &free); err != nil {
+		return nil, fmt.Errorf("parse free bucket: %w", err)
+	}
+
+	now := time.Now().Unix()
+	out := modelList{Object: "list", Data: make([]modelItem, 0, len(free))}
+	for _, e := range free {
+		id := strings.TrimSpace(e.ID)
+		if id == "" {
+			continue // 无 ID 的条目对下游无意义
+		}
+		out.Data = append(out.Data, modelItem{
+			ID:          id,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     ownerOf(id),
+			Name:        strings.TrimSpace(e.Name),
+			Description: strings.TrimSpace(e.Description),
+		})
+	}
+	return json.Marshal(out)
+}
+
+// joinKeys 按字典序拼接顶层字段名，用于 free 桶缺失时给出可诊断的报错。
+func joinKeys(m map[string]json.RawMessage) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
+}
+
+// ownerOf 取模型 ID 的命名空间前缀作为 owned_by，与官方 /v1/models 的惯例一致
+// （如 inclusionai/ling-3.1-flash → inclusionai）。无前缀时回落为 "cline"。
+func ownerOf(id string) string {
+	if i := strings.IndexByte(id, '/'); i > 0 {
+		return id[:i]
+	}
+	return "cline"
 }
 
 // Classify 处理两类特殊响应：
