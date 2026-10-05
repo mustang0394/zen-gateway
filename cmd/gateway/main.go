@@ -39,6 +39,7 @@ import (
 
 	"zengateway/internal/config"
 	"zengateway/internal/cooldown"
+	"zengateway/internal/idmap"
 	"zengateway/internal/inject"
 	"zengateway/internal/provider"
 	"zengateway/internal/provider/cline"
@@ -96,7 +97,10 @@ func main() {
 	versionsFn := func() provider.Versions {
 		return provider.Versions{Zen: vers.Zen(), ClineCLI: vers.ClineCLI(), ClineSDK: vers.ClineSDK()}
 	}
-	zenHandler := provider.NewHandler(zen.New(cfg.ZenUpstream, inj), provider.Runtime{
+	zenProvider := zen.New(cfg.ZenUpstream, inj)
+	// ID 映射（非法 session/request → 合法格式）的后台过期清理
+	zenProvider.StartIDSweeper(ctx, idmap.DefaultSweepInterval)
+	zenHandler := provider.NewHandler(zenProvider, provider.Runtime{
 		Store: st, Log: log, Versions: versionsFn,
 	})
 	clineHandler := provider.NewHandler(cline.New(cfg.ClineUpstream, cfg.ClineCooldownFallback, inj), provider.Runtime{

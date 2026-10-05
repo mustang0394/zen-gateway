@@ -137,8 +137,8 @@ print(resp.choices[0].message.content)
 | 上游校验项 | 网关处理 |
 |---|---|
 | `User-Agent: opencode/<semver>` | 每日从 GitHub 同步最新版本号，无条件覆盖客户端值 |
-| `x-opencode-session` | 缺失时按 opencode ID 算法生成（`ses_` + 12 hex + 14 base62） |
-| `x-opencode-request` | 缺失时生成 `msg_` ID |
+| `x-opencode-session` | 格式严格校验（见下）：合法则保留，非法则映射为网关生成的合法 ID |
+| `x-opencode-request` | 同上（上游实测不校验该头，网关统一处理以保持一致） |
 | `x-opencode-client` / `x-opencode-project` | 缺失时补 `cli` / `global` |
 | `Authorization` | 失败时补 `Bearer public`；Key 由网关侧从池中选择 |
 | 请求体 `tools` 含 `bash` 与 `read` | 缺失的以最小 schema 注入（chat 与 responses 两种结构分别处理） |
@@ -147,6 +147,37 @@ print(resp.choices[0].message.content)
 另外执行安全转发策略：**请求头白名单**（仅 `Accept`、`Authorization`、`Content-Type`、
 `User-Agent` 与 `x-opencode-*` 透传，Cookie、`x-stainless-*` 等一律丢弃）；请求体经
 `json.Decoder.UseNumber` 处理，重编码不丢失数字精度。
+
+### 客户端 ID 校验与映射（session / request）
+
+上游免费层会**严格校验** `x-opencode-session` 的结构，不符合即返回
+`FreeTierError: OpenCode's free tier can only be used from within OpenCode`。
+网关按下列规则处理，兼顾「能通过校验」与「不破坏上游 prompt 缓存」：
+
+| 下游传入 | 网关行为 |
+|---|---|
+| 未传该头 | 生成一个合法 ID |
+| **合法**的 `ses_`/`msg_` ID | **原样保留**（保住客户端自己的会话与上游缓存） |
+| **非法**值（如 UUID） | 按原值映射到网关生成的合法 ID；同一原值在 TTL 内稳定复用同一 ID |
+
+合法格式（实测，大小写与长度都必须精确）：
+
+```
+x-opencode-session: ses_ + 12 位小写 hex + 14 位 base62   共 30 字符
+x-opencode-request: msg_ + 12 位小写 hex + 14 位 base62   共 30 字符
+```
+
+> **为什么需要映射**：部分第三方客户端（例如 OpenClaw 用 `randomUUID()` 作为
+> sessionId）会发送 UUID 形态的值，实测会被上游判定为非官方客户端并 403。
+> 若简单地对每个请求重新生成 ID，上游会话每次都在变、prompt 缓存前缀失效；
+> 因此按原始值建立映射，使同一客户端会话始终得到同一个合法 ID。
+
+映射特性：
+
+- **仅存内存**，不落盘
+- 条目 **3600 秒**（1 小时）未被访问即过期；后台每分钟清理一次，写入时也会顺带清理
+- 容量上限 10 万条（超出后按近似 LRU 淘汰），防止异常客户端撑爆内存
+- 未传头与合法 ID 都**不会**占用映射空间
 
 ### cline 模块
 
@@ -430,6 +461,7 @@ zen-gateway/
 │   │   └── cline/         # cline：固定头、403 重试、429 时长解析
 │   ├── cooldown/          # 冷却池服务与数据保留策略
 │   ├── inject/            # 系统提示词注入（关键词检测 + 整体替换）
+│   ├── idmap/             # 非法客户端 ID → 合法 ID 的内存映射（TTL 3600s）
 │   ├── prompt/            # 各模块原生提示词（内嵌 + 运行时覆盖）
 │   ├── stats/             # SSE 解析：usage 与 TTFT 采集
 │   ├── version/           # 多目标版本管理（zen / cline.cli / cline.sdk）

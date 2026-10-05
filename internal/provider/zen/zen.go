@@ -15,12 +15,14 @@
 package zen
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"zengateway/internal/idgen"
+	"zengateway/internal/idmap"
 	"zengateway/internal/inject"
 	"zengateway/internal/provider"
 	"zengateway/internal/store"
@@ -54,14 +56,79 @@ type Provider struct {
 	upstream string
 	// inj 是系统提示词注入引擎；为 nil 时跳过注入。
 	inj *inject.Engine
+	// sessions 与 messages 把下游传来的**非法** ID 映射为网关生成的合法 ID。
+	//
+	// 上游只接受严格格式的 x-opencode-session（见 internal/idgen 的实测记录），
+	// 第三方客户端（如 OpenClaw 用 randomUUID()）的 ID 会被判为非官方客户端而 403。
+	// 若每个请求都重新生成，上游 session 会不断变化、prompt 缓存前缀失效；
+	// 因此按原始值建立映射，让同一客户端会话始终得到同一个合法 ID。
+	// 映射仅存内存，条目 1 小时未访问即过期。
+	sessions *idmap.Map
+	messages *idmap.Map
 }
+
+// SessionTTL 是 ID 映射条目的存活时间（需求：3600s）。
+const SessionTTL = time.Hour
 
 // New 创建 zen 模块；upstreamBase 为空时使用默认上游，inj 为 nil 表示不注入。
 func New(upstreamBase string, inj *inject.Engine) *Provider {
+	return NewWithTTL(upstreamBase, inj, SessionTTL)
+}
+
+// NewWithTTL 同 New，但可指定 ID 映射的过期时间（<=0 时用默认值）。主要供测试使用。
+func NewWithTTL(upstreamBase string, inj *inject.Engine, ttl time.Duration) *Provider {
 	if strings.TrimSpace(upstreamBase) == "" {
 		upstreamBase = DefaultUpstream
 	}
-	return &Provider{upstream: strings.TrimRight(upstreamBase, "/"), inj: inj}
+	return &Provider{
+		upstream: strings.TrimRight(upstreamBase, "/"),
+		inj:      inj,
+		sessions: idmap.New(idgen.Session, ttl),
+		messages: idmap.New(idgen.Message, ttl),
+	}
+}
+
+// StartIDSweeper 启动 ID 映射的后台清理协程。
+// 调用方应在进程退出时 cancel context。
+func (p *Provider) StartIDSweeper(ctx context.Context, interval time.Duration) {
+	if p.sessions != nil {
+		p.sessions.StartSweeper(ctx, interval)
+	}
+	if p.messages != nil {
+		p.messages.StartSweeper(ctx, interval)
+	}
+}
+
+// resolveSession 返回可安全发往上游的 session ID：
+//   - 下游未传 → 生成新的合法 ID
+//   - 下游传了合法值 → 原样保留（保住客户端自己的 session 与上游缓存）
+//   - 下游传了非法值 → 按原值映射到网关生成的合法 ID（同一原值稳定复用）
+func (p *Provider) resolveSession(v string) string {
+	if v == "" {
+		return idgen.Session()
+	}
+	if idgen.IsSession(v) {
+		return v
+	}
+	if p.sessions == nil {
+		return idgen.Session()
+	}
+	return p.sessions.Resolve(v)
+}
+
+// resolveMessage 同 resolveSession，用于 x-opencode-request。
+// 注：上游实测不校验该头格式，此处仍统一处理以保持两个头行为一致。
+func (p *Provider) resolveMessage(v string) string {
+	if v == "" {
+		return idgen.Message()
+	}
+	if idgen.IsMessage(v) {
+		return v
+	}
+	if p.messages == nil {
+		return idgen.Message()
+	}
+	return p.messages.Resolve(v)
 }
 
 func (p *Provider) Name() string         { return "zen" }
@@ -147,8 +214,10 @@ func (p *Provider) BuildHeaders(downstream http.Header, key store.APIKey, v prov
 	// x-opencode-* 四件套
 	h.Set("x-opencode-client", orDefault(h.Get("x-opencode-client"), defaultClient))
 	h.Set("x-opencode-project", orDefault(h.Get("x-opencode-project"), defaultProject))
-	h.Set("x-opencode-request", orDefault(h.Get("x-opencode-request"), idgen.Message()))
-	h.Set("x-opencode-session", orDefault(h.Get("x-opencode-session"), idgen.Session()))
+	// x-opencode-session / x-opencode-request：下游值合法则保留，非法则映射/生成。
+	// 上游只校验 session 的格式（实测），非法 session 会导致 403 FreeTierError。
+	h.Set("x-opencode-request", p.resolveMessage(strings.TrimSpace(h.Get("x-opencode-request"))))
+	h.Set("x-opencode-session", p.resolveSession(strings.TrimSpace(h.Get("x-opencode-session"))))
 	return h
 }
 
