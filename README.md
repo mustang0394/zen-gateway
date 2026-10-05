@@ -177,13 +177,18 @@ ID 的命名空间前缀，与官方 `/v1/models` 惯例一致）；`name` 与 `
 | `x-opencode-session` | 格式严格校验（见下）：合法则保留，非法则映射为网关生成的合法 ID |
 | `x-opencode-request` | 同上（上游实测不校验该头，网关统一处理以保持一致） |
 | `x-opencode-client` / `x-opencode-project` | 缺失时补 `cli` / `global` |
-| `Authorization` | 失败时补 `Bearer public`；Key 由网关侧从池中选择 |
+| `Authorization` | **完全由池中 Key 决定**，不透传下游值；未配 Key（匿名）时用 `Bearer public` |
 | 请求体 `tools` 含 `bash` 与 `read` | 缺失的以最小 schema 注入（chat 与 responses 两种结构分别处理） |
 | `stream: true` | 强制改写为流式，并原样转发上游 SSE |
 
-另外执行安全转发策略：**请求头白名单**（仅 `Accept`、`Authorization`、`Content-Type`、
-`User-Agent` 与 `x-opencode-*` 透传，Cookie、`x-stainless-*` 等一律丢弃）；请求体经
+另外执行安全转发策略：**请求头白名单**（仅 `Accept`、`Content-Type`、`User-Agent`
+与 `x-opencode-*` 透传，Cookie、`x-stainless-*`、`Authorization` 等一律丢弃）；请求体经
 `json.Decoder.UseNumber` 处理，重编码不丢失数字精度。
+
+> `Authorization` 不透传是有意为之：下游携带的是**网关自己的接入 Token**，
+> 与上游凭据无关。早期实现会沿用下游值，导致配置接入 Token 后网关 Token 被当作
+> 上游 key 发送，上游一律返回 `401 Invalid API key`（已修复）。若需要客户端自带
+> 上游 Key，请将其配置到池中而非从下游传入。
 
 ### 客户端 ID 校验与映射（session / request）
 

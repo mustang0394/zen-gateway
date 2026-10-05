@@ -7,7 +7,7 @@
 //	x-opencode-request                 缺失时生成 msg_ ID
 //	x-opencode-client                  缺失时补 cli
 //	x-opencode-project                 缺失时补 global
-//	Authorization                      缺失时补 Bearer public
+//	Authorization                      完全由池中 key 决定（匿名回落到 Bearer public）
 //	body.stream                        强制 true
 //	body.tools                         必须同时包含 bash 与 read
 //
@@ -37,9 +37,11 @@ const (
 )
 
 // passHeaders 是允许透传给上游的请求头白名单。
+//
+// authorization 故意不在其中：下游的 Authorization 是网关自身的接入 Token，
+// 必须由池中 key 决定发给上游的值（见 BuildHeaders）。
 var passHeaders = map[string]bool{
 	"accept":             true,
-	"authorization":      true,
 	"content-type":       true,
 	"user-agent":         true, // 会随后被覆盖为网关值
 	"x-opencode-client":  true,
@@ -193,8 +195,13 @@ func (p *Provider) BuildHeaders(downstream http.Header, key store.APIKey, v prov
 		}
 	}
 
-	// Authorization：优先池中 key；匿名 key 使用 public
-	authz := strings.TrimSpace(h.Get("Authorization"))
+	// Authorization：完全由池中 key 决定，不透传下游值。
+	//
+	// 下游的 Authorization 是网关自己的接入 Token（或客户端随手带的值），
+	// 与上游凭据无关。早期实现优先沿用下游值，导致配置了接入 Token 后，
+	// 网关 Token 被当作上游 key 发送，上游一律回 401 Invalid API key
+	// （实测确认）。仅匿名 key（池中未配）且下游未带时回落到 public。
+	authz := ""
 	if key.APIKey != "" && !key.IsAnonymous {
 		authz = "Bearer " + key.APIKey
 	}
