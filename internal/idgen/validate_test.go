@@ -1,15 +1,18 @@
 package idgen
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 // TestIsSession 锁定上游对 x-opencode-session 的格式要求。
-// 用例中的拒绝项均经真实上游验证会返回 403 FreeTierError（见 idgen.go 注释）。
+// 用例中的拒绝项均经真实上游验证会返回 403 FreeTierError(见 idgen.go 注释)。
 func TestIsSession(t *testing.T) {
 	valid := []string{
-		"ses_ef5920720ffeDse8BpbCnsgiMT",
-		"ses_000000000000AAAAAAAAAAAAAA",
-		"ses_ffffffffffffzzzzzzzzzzzzzz",
-		"ses_0123456789abABCDEFGHIJKLMN", // 12 位 hex + 14 位 base62（含大写）
+		"ses_ef5920720ffeDse8BpbCnsgiMT", // 末3位 ffe -> counter 1
+		"ses_000000000fc0AAAAAAAAAAAAAA", // 边界:counter 63
+		"ses_ffffffffffffzzzzzzzzzzzzzz", // 末3位 fff -> counter 0
+		"ses_012345678fcdABCDEFGHIJKLMN", // 12 位 hex + 14 位 base62(含大写),末3位 fcd
 	}
 	for _, id := range valid {
 		if !IsSession(id) {
@@ -34,6 +37,10 @@ func TestIsSession(t *testing.T) {
 		"OpenClaw turnId": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
 		"含空格":             "    ses_ef5920720ffeDse8BpbCnsgiMT",
 		"普通字符串":           "claude-code-session-abc123",
+		// counter 越界(末 3 位 < 0xfc0)会被上游判为非本机客户端
+		"counter 越界 0xfb0": "ses_ec7e93b69fb0NmyID7kgcopmeT",
+		"counter 越界 0x000": "ses_ec7e93b69000NmyID7kgcopmeT",
+		"counter 越界 0xf00": "ses_ec7e93b69f00NmyID7kgcopmeT",
 	}
 	for label, id := range invalid {
 		if IsSession(id) {
@@ -56,9 +63,43 @@ func TestIsMessage(t *testing.T) {
 			t.Errorf("IsMessage(%q) = true, want false", id)
 		}
 	}
-	// session 与 message 的校验规则一致（仅前缀不同）
+	// session 与 message 的校验规则一致(仅前缀不同)
 	if IsMessage("msg_ef5920720ffeDse8BpbCnsgiMT") == false {
 		t.Error("same body length should be accepted for msg_ prefix")
+	}
+}
+
+// TestCounterBoundary 锁定上游对时间戳低 12 位(counter)的边界。
+// 实测:末 3 位 0xfc0(counter 63)通过,0xfbf(counter 64)拒绝。
+func TestCounterBoundary(t *testing.T) {
+	// 取一个固定高 9 位,只改末 3 位
+	const head = "ses_ec7e93b69"
+	const tail = "NmyID7kgcopmeT"
+	if !IsSession(head + "fc0" + tail) {
+		t.Error("counter 63 (0xfc0) must be valid")
+	}
+	if !IsSession(head + "fff" + tail) {
+		t.Error("counter 0 (0xfff) must be valid")
+	}
+	if IsSession(head + "fbf" + tail) {
+		t.Error("counter 64 (0xfbf) must be invalid")
+	}
+	if IsSession(head + "000" + tail) {
+		t.Error("counter 4094 (0x000) must be invalid")
+	}
+}
+
+// TestGeneratedCounterWithinBound 验证生成器产出的 counter 始终 <= MaxCounter。
+func TestGeneratedCounterWithinBound(t *testing.T) {
+	for i := 0; i < 5000; i++ {
+		s := Session()
+		low, err := strconv.ParseUint(s[4+hexLen-3:4+hexLen], 16, 16)
+		if err != nil {
+			t.Fatalf("parse counter from %q: %v", s, err)
+		}
+		if low < hexCounterMin {
+			t.Fatalf("generated counter out of bound: %q (low=0x%03x)", s, low)
+		}
 	}
 }
 

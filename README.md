@@ -173,7 +173,7 @@ ID 的命名空间前缀，与官方 `/v1/models` 惯例一致）；`name` 与 `
 
 | 上游校验项 | 网关处理 |
 |---|---|
-| `User-Agent: opencode/<semver>` | 每日从 GitHub 同步最新版本号，无条件覆盖客户端值 |
+| `User-Agent: opencode/<semver>` | 每日从 GitHub 同步最新版本号,无条件覆盖客户端值。上游只要求**以 `opencode/` 开头**(纯 `opencode`、`curl`、`python-requests` 等一律 403)|
 | `x-opencode-session` | 格式严格校验（见下）：合法则保留，非法则映射为网关生成的合法 ID |
 | `x-opencode-request` | 同上（上游实测不校验该头，网关统一处理以保持一致） |
 | `x-opencode-client` / `x-opencode-project` | 缺失时补 `cli` / `global` |
@@ -192,8 +192,8 @@ ID 的命名空间前缀，与官方 `/v1/models` 惯例一致）；`name` 与 `
 
 ### 客户端 ID 校验与映射（session / request）
 
-上游免费层会**严格校验** `x-opencode-session` 的结构，不符合即返回
-`FreeTierError: OpenCode's free tier can only be used from within OpenCode`。
+上游免费层会**严格校验** `x-opencode-session` 的结构**与时间戳低 12 位(counter)边界**,
+不符合即返回 `FreeTierError: OpenCode's free tier can only be used from within OpenCode`。
 网关按下列规则处理，兼顾「能通过校验」与「不破坏上游 prompt 缓存」：
 
 | 下游传入 | 网关行为 |
@@ -202,12 +202,28 @@ ID 的命名空间前缀，与官方 `/v1/models` 惯例一致）；`name` 与 `
 | **合法**的 `ses_`/`msg_` ID | **原样保留**（保住客户端自己的会话与上游缓存） |
 | **非法**值（如 UUID） | 按原值映射到网关生成的合法 ID；同一原值在 TTL 内稳定复用同一 ID |
 
-合法格式（实测，大小写与长度都必须精确）：
+合法格式(实测,大小写、长度与**counter 边界**都必须精确):
 
 ```
 x-opencode-session: ses_ + 12 位小写 hex + 14 位 base62   共 30 字符
 x-opencode-request: msg_ + 12 位小写 hex + 14 位 base62   共 30 字符
 ```
+
+其中前 12 位 hex 是 **descending 时间戳**(`~ (ts_ms * 0x1000 + counter)` 的低 48 位)。
+上游除结构外还会校验**时间戳低 12 位(counter)**:
+
+| counter(hex 主体末 3 位) | 结果 |
+|---|---|
+| `0 .. 63`(`0xfff .. 0xfc0`) | 200 |
+| `64 .. 4094`(`0xfbf .. 0x000`) | **403 FreeTierError** |
+
+这与 opencode 客户端 `identifier.ts` 的语义一致:counter 在**每一毫秒重置**,
+同一毫秒内最多递增,因此正常客户端产出的 counter 必然很小。上游据此识别
+「非本机连续生成的 ID」——这也是 2026-10 新增的校验(此前只校验结构)。
+
+> **注意**:网关早期版本用全局自增 `counter % 0x1000` 生成 ID,counter 会均匀
+> 落在 `0..4094`,其中 62/64 的取值越界。表现为**随机性 403**:同一个合法请求
+> 约 3% 失败。现已改为逐毫秒重置的 1..63(见 `internal/idgen`)。
 
 > **为什么需要映射**：部分第三方客户端（例如 OpenClaw 用 `randomUUID()` 作为
 > sessionId）会发送 UUID 形态的值，实测会被上游判定为非官方客户端并 403。

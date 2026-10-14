@@ -8,36 +8,73 @@
 //   - ascending:   v = ts*0x1000 + counter
 //   - descending:  v = ~v（按 64 位有符号取反，截取低 48 位）
 //
-// 服务端只校验结构（ses_ 前缀 + 12 位小写 hex + 14 位 base62），
-// 这里按 descending 语义生成，与真实 opencode 客户端一致。
+// 服务端除了结构(ses_ 前缀 + 12 位小写 hex + 14 位 base62)之外,
+// **还校验时间戳低 12 位的取值**:counter 即 `v & 0xFFF`(descending 取反后
+// 的同一字段),上游要求 counter <= 63,等价于 hex 主体末 3 位 >= 0xfc0。
+// counter 越界一律 403 FreeTierError(实测,见下方 validate 段注释)。
+//
+// 这与 opencode 客户端 identifier.ts 的语义一致:counter 在**每一毫秒重置**
+// (timestamp 变化即 counter=0),同一毫秒内最多递增,因此正常客户端产出的
+// counter 必然很小;上游据此识别「非本机连续生成的 ID」。
 package idgen
 
 import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
-	"sync/atomic"
+	"strconv"
+	"sync"
 	"time"
 )
 
 const (
 	alphabet    = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	totalLength = 26 // 前缀后 ID 主体总长：12 hex + 14 base62
+	totalLength = 26 // 前缀后 ID 主体总长:12 hex + 14 base62
 	timeScale   = 0x1000
+	// MaxCounter 是上游允许的时间戳低 12 位最大值(实测边界:63 通过、64 拒绝)。
+	// 对应 opencode identifier.ts 中 counter 逐毫秒重置、同一毫秒内最多 +1 的语义。
+	MaxCounter = 63
 )
 
-var counter atomic.Uint64
+// counter 模拟 opencode 客户端:**每一毫秒重置**。
+//
+// 不能用全局自增取模:那样产出的 counter 会均匀落在 0..4094,
+// 其中 62/64 的取值超出上游 MaxCounter 而被判为非官方客户端(403)。
+var (
+	counterMu  sync.Mutex
+	counterMs  int64 // counter 当前所属的毫秒时间戳
+	counterVal uint64
+)
 
 // Session 生成 ses_ 前缀的会话 ID。
 func Session() string { return create("ses") }
 
-// Message 生成 msg_ 前缀的消息 ID（用作 x-opencode-request）。
+// Message 生成 msg_ 前缀的消息 ID(用作 x-opencode-request)。
 func Message() string { return create("msg") }
 
 func create(prefix string) string {
-	now := time.Now().UnixMilli()*timeScale + int64(counter.Add(1)%(timeScale-1))
-	// descending：64 位取反后截低 48 位
-	inverted := (^now) & ((1 << 48) - 1)
+	ms := time.Now().UnixMilli()
+
+	counterMu.Lock()
+	if ms != counterMs {
+		counterMs = ms
+		counterVal = 0
+	}
+	counterVal++
+	c := counterVal
+	if c > MaxCounter {
+		// 同一毫秒内请求超过 MaxCounter 次(几乎不可能,单机毫秒级 64 次)。
+		// 若回绕到 1 会与已有 ID 冲突,且 counter 仍是合法值;这里进位到下一毫秒
+		// 以同时保证唯一性与合法性。
+		counterMs = ms + 1
+		counterVal = 1
+		ms = counterMs
+		c = counterVal
+	}
+	counterMu.Unlock()
+
+	// descending:64 位取反后截低 48 位
+	inverted := (^(ms*timeScale + int64(c))) & ((1 << 48) - 1)
 	return prefix + "_" + fmt.Sprintf("%012x", inverted) + randomBase62(14)
 }
 
@@ -58,23 +95,29 @@ func randomBase62(n int) string {
 
 // ---- 格式校验 -------------------------------------------------------------
 //
-// 上游只校验 x-opencode-session 的结构（实测结论，见 idgen_test.go 的对照记录）：
-// 必须是 `ses_` + 恰好 12 位**小写** hex + 恰好 14 位 base62。
-// 大小写、长度或字符集不符都会被判定为非官方客户端，返回 403 FreeTierError。
+// 上游校验 x-opencode-session 的两类规则(均经真实上游实测,见 validate_test.go):
 //
-// 实测对照（对真实上游 opencode.ai/zen/v1）：
+//  1. 结构:`ses_` + 恰好 12 位**小写** hex + 恰好 14 位 base62。
+//  2. 时间戳低 12 位(counter,hex 主体末 3 位)必须 <= MaxCounter(63),
+//     即末 3 位 >= 0xfc0;越界视为非本机客户端。
 //
-//	ses_ef5920720ffeDse8BpbCnsgiMT  → 200（12 小写 hex + 14 base62）
-//	ses_EF5920720FFEDse8BpbCnsgiMT  → 403（hex 大写）
-//	ses_ef5920720ffDse8BpbCnsgiMTX  → 403（hex 11 位）
-//	ses_ef5920720fffeDse8BpbCnsgiMT → 403（hex 13 位）
-//	ses_gf5920720ffgDse8BpbCnsgiMT  → 403（hex 含非 hex 字符）
-//	ses_ef5920720ffeDse8BpbCnsgiM   → 403（base62 13 位）
-//	ses_ef5920720ffeDse8BpbCnsgiMTX → 403（base62 15 位）
-//	ses_ef5920720ffeDse8BpbCnsgiM_  → 403（base62 含下划线）
+// 实测对照(对真实上游 opencode.ai/zen/v1):
 //
-// 注：x-opencode-request 实测不做格式校验（UUID、短值、错误前缀均放行），
-// 但这里仍按同一规则校验，以便在网关侧统一处理、并为上游日后收紧规则留出余量。
+//	ses_ef5920720ffeDse8BpbCnsgiMT  → 200(12 小写 hex + 14 base62,末3位 ffe)
+//	ses_EF5920720FFEDse8BpbCnsgiMT  → 403(hex 大写)
+//	ses_ef5920720ffDse8BpbCnsgiMTX  → 403(hex 11 位)
+//	ses_ef5920720fffeDse8BpbCnsgiMT → 403(hex 13 位)
+//	ses_gf5920720ffgDse8BpbCnsgiMT  → 403(hex 含非 hex 字符)
+//	ses_ef5920720ffeDse8BpbCnsgiM   → 403(base62 13 位)
+//	ses_ef5920720ffeDse8BpbCnsgiMTX → 403(base62 15 位)
+//	ses_ef5920720ffeDse8BpbCnsgiM_  → 403(base62 含下划线)
+//	ses_<12hex 末3位 fc0..fff>     → 200(counter 0..63)
+//	ses_<12hex 末3位 000..fbf>     → 403(counter 64..4094)
+//
+// 边界精确到末 3 位:0xfc0 通过、0xfbf 拒绝。
+//
+// 注:x-opencode-request 实测只校验前缀/长度,末 3 位与 counter 无关;
+// 但这里用同一套规则校验,以便网关侧统一处理。
 
 const (
 	// hexLen 是 ID 主体中时间部分的十六进制位数。
@@ -83,8 +126,11 @@ const (
 	b62Len = 14
 	// bodyLen 是前缀之后的主体长度。
 	bodyLen = hexLen + b62Len
-	// fullLen 是含前缀与下划线的完整长度（3 + 1 + 26）。
+	// fullLen 是含前缀与下划线的完整长度(3 + 1 + 26)。
 	fullLen = 30
+	// hexCounterMin 是时间部分低 12 位(counter)的下界,即 hex 主体末 3 位的最小值。
+	// 上游要求 counter 落在 [0, MaxCounter],换算成 hex 即末 3 位 >= 0xfff-MaxCounter。
+	hexCounterMin = 0xfff - MaxCounter // 0xfc0
 )
 
 // isLowerHex 报告字符是否为小写十六进制。
@@ -117,6 +163,12 @@ func isValidID(id, prefix string) bool {
 		if !isBase62(id[i]) {
 			return false
 		}
+	}
+	// 时间戳低 12 位(counter)必须 <= MaxCounter,即末 3 位 hex >= 0xfc0。
+	// 上游据此识别非本机客户端:counter 越界返回 403 FreeTierError(实测边界 63/64)。
+	low, err := strconv.ParseUint(id[4+hexLen-3:4+hexLen], 16, 16)
+	if err != nil || low < hexCounterMin {
+		return false
 	}
 	return true
 }
