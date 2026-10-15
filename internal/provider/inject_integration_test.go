@@ -84,7 +84,7 @@ func TestZenReplacesSystemPromptOnKeywordHit(t *testing.T) {
 	eng := newInjectEngine(t, st, store.Keyword{
 		Module: "zen", Keyword: "Claude Code", Note: "第三方客户端", Enabled: true,
 	})
-	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, eng),
+	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, up.srv.URL, eng),
 		provider.Runtime{Store: st, Versions: testVersions}), nil, map[string]string{"zen": ""})
 
 	rec := postJSON(t, h, "/zen/v1/chat/completions", "",
@@ -118,8 +118,8 @@ func TestZenReplacesSystemPromptOnKeywordHit(t *testing.T) {
 		fn := tv.(map[string]any)["function"].(map[string]any)
 		names[fn["name"].(string)] = true
 	}
-	if !names["bash"] || !names["read"] {
-		t.Errorf("bash/read stubs must still be injected, got %v", names)
+	if !names["shell"] || !names["read"] {
+		t.Errorf("shell/read core tools must still be injected, got %v", names)
 	}
 }
 
@@ -128,7 +128,7 @@ func TestZenNoKeywordHitKeepsPrompt(t *testing.T) {
 	up := newCaptureUpstream(t)
 	st := newStore(t)
 	eng := newInjectEngine(t, st, store.Keyword{Module: "zen", Keyword: "Claude Code", Enabled: true})
-	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, eng),
+	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, up.srv.URL, eng),
 		provider.Runtime{Store: st, Versions: testVersions}), nil, map[string]string{"zen": ""})
 
 	const original = "You are a helpful coding assistant."
@@ -150,7 +150,7 @@ func TestKeywordMatchingIsCaseInsensitive(t *testing.T) {
 		up := newCaptureUpstream(t)
 		st := newStore(t)
 		eng := newInjectEngine(t, st, store.Keyword{Module: "zen", Keyword: "Claude Code", Enabled: true})
-		h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, eng),
+		h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, up.srv.URL, eng),
 			provider.Runtime{Store: st, Versions: testVersions}), nil, map[string]string{"zen": ""})
 
 		postJSON(t, h, "/zen/v1/chat/completions", "",
@@ -202,7 +202,7 @@ func TestGlobalKeywordAppliesToBothModules(t *testing.T) {
 
 	// zen 走内置提示词
 	upZen := newCaptureUpstream(t)
-	zenH := newTestAPI(provider.NewHandler(zen.New(upZen.srv.URL, eng),
+	zenH := newTestAPI(provider.NewHandler(zen.New(upZen.srv.URL, upZen.srv.URL, eng),
 		provider.Runtime{Store: st, Versions: testVersions}), nil, map[string]string{"zen": ""})
 	postJSON(t, zenH, "/zen/v1/chat/completions", "",
 		`{"model":"m","messages":[{"role":"system","content":"You are Claude Code"}]}`)
@@ -233,7 +233,7 @@ func TestPromptOverrideTakesEffect(t *testing.T) {
 	}
 	eng.Reload()
 
-	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, eng),
+	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, up.srv.URL, eng),
 		provider.Runtime{Store: st, Versions: testVersions}), nil, map[string]string{"zen": ""})
 	postJSON(t, h, "/zen/v1/chat/completions", "",
 		`{"model":"m","messages":[{"role":"system","content":"You are Claude Code"}]}`)
@@ -248,7 +248,7 @@ func TestStructuredFieldsNeverInjected(t *testing.T) {
 	up := newCaptureUpstream(t)
 	st := newStore(t)
 	eng := newInjectEngine(t, st, store.Keyword{Module: store.ModuleAll, Keyword: "Claude Code", Enabled: true})
-	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, eng),
+	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, up.srv.URL, eng),
 		provider.Runtime{Store: st, Versions: testVersions}), nil, map[string]string{"zen": ""})
 
 	body := `{"model":"ClaudeCode-model","temperature":0.3,
@@ -277,7 +277,7 @@ func TestResponsesInstructionsInjected(t *testing.T) {
 	up := newCaptureUpstream(t)
 	st := newStore(t)
 	eng := newInjectEngine(t, st, store.Keyword{Module: "zen", Keyword: "Claude Code", Enabled: true})
-	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, eng),
+	h := newTestAPI(provider.NewHandler(zen.New(up.srv.URL, up.srv.URL, eng),
 		provider.Runtime{Store: st, Versions: testVersions}), nil, map[string]string{"zen": ""})
 
 	postJSON(t, h, "/zen/v1/responses", "",
@@ -300,7 +300,7 @@ func TestPrepareBodyNilSafety(t *testing.T) {
 				t.Errorf("zen.PrepareBody(nil) panicked: %v", r)
 			}
 		}()
-		if changed := zen.New("", nil).PrepareBody(provider.KindChat, nil); changed {
+		if changed := zen.New("", "", nil).PrepareBody(provider.KindChat, nil); changed {
 			t.Error("nil body should report no change")
 		}
 	})

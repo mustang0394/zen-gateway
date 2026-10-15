@@ -41,7 +41,7 @@ func TestStreamingStatsEndToEnd(t *testing.T) {
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "zen", Label: "A", APIKey: "public", Enabled: true, IsAnonymous: true})
 
-	h := provider.NewHandler(zen.New(up.URL, nil), provider.Runtime{
+	h := provider.NewHandler(zen.New(up.URL, up.URL, nil), provider.Runtime{
 		Store: st,
 		Versions: func() provider.Versions {
 			return provider.Versions{Zen: "1.18.34"}
@@ -116,7 +116,7 @@ func TestZenCooldownUntilNextMidnightEndToEnd(t *testing.T) {
 	a, _ := st.CreateKey(store.APIKey{Module: "zen", Label: "A", APIKey: "public", Enabled: true, IsAnonymous: true})
 	b, _ := st.CreateKey(store.APIKey{Module: "zen", Label: "B", APIKey: "public", Enabled: true, IsAnonymous: true})
 
-	h := provider.NewHandler(zen.New(up.URL, nil), provider.Runtime{
+	h := provider.NewHandler(zen.New(up.URL, up.URL, nil), provider.Runtime{
 		Store: st,
 		Versions: func() provider.Versions {
 			return provider.Versions{Zen: "1.18.34"}
@@ -175,7 +175,7 @@ func TestFullRouterIntegration(t *testing.T) {
 	versions := func() provider.Versions {
 		return provider.Versions{Zen: "1.18.34", ClineCLI: "4.1.22", ClineSDK: "0.0.90"}
 	}
-	zenH := provider.NewHandler(zen.New(up.URL, nil), provider.Runtime{Store: st, Versions: versions})
+	zenH := provider.NewHandler(zen.New(up.URL, up.URL, nil), provider.Runtime{Store: st, Versions: versions})
 	clineH := provider.NewHandler(cline.New(up.URL, time.Hour, nil), provider.Runtime{Store: st, Versions: versions})
 
 	tokens := map[string]string{"zen": "", "cline": "gw-cline"}
@@ -334,7 +334,7 @@ func TestZenHeadersReachUpstream(t *testing.T) {
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "zen", APIKey: "public", Enabled: true, IsAnonymous: true})
 
-	h := provider.NewHandler(zen.New(up.URL, nil), provider.Runtime{
+	h := provider.NewHandler(zen.New(up.URL, up.URL, nil), provider.Runtime{
 		Store: st,
 		Versions: func() provider.Versions {
 			return provider.Versions{Zen: "1.18.34"}
@@ -352,16 +352,22 @@ func TestZenHeadersReachUpstream(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	if ua := got.Get("User-Agent"); ua != "opencode/1.18.34" {
-		t.Errorf("User-Agent = %q, want opencode/1.18.34", ua)
+	if ua := got.Get("User-Agent"); ua != "opencode/latest/1.18.34/cli" {
+		t.Errorf("User-Agent = %q, want opencode/latest/1.18.34/cli", ua)
 	}
-	for _, k := range []string{"X-Opencode-Session", "X-Opencode-Request"} {
-		if got.Get(k) == "" {
-			t.Errorf("%s must be injected", k)
-		}
+	// 会话两个头必须同值；x-opencode-request 已废弃，不允许发出
+	ses := got.Get("X-Opencode-Session")
+	if ses == "" || got.Get("X-Opencode-Session-Id") != ses {
+		t.Error("x-opencode-session/session-id must be injected with the same value")
 	}
-	if got.Get("X-Opencode-Client") != "cli" || got.Get("X-Opencode-Project") != "global" {
-		t.Error("x-opencode-client/project defaults missing")
+	if got.Get("X-Opencode-Request") != "" {
+		t.Error("x-opencode-request must not be sent upstream")
+	}
+	if got.Get("X-Opencode-Client") != "cli" {
+		t.Error("x-opencode-client default missing")
+	}
+	if project := got.Get("X-Opencode-Project"); len(project) != 40 {
+		t.Errorf("x-opencode-project = %q, want a bare 40hex id", project)
 	}
 	if got.Get("X-Stainless-Lang") != "" {
 		t.Error("x-stainless-* must be dropped")
@@ -381,8 +387,11 @@ func TestZenHeadersReachUpstream(t *testing.T) {
 		fn := m["function"].(map[string]any)
 		names[fn["name"].(string)] = true
 	}
-	if !names["bash"] || !names["read"] {
-		t.Errorf("bash and read tools must be injected, got %v", names)
+	if !names["shell"] || !names["read"] {
+		t.Errorf("shell and read tools must be injected, got %v", names)
+	}
+	if names["bash"] {
+		t.Error("bash must not be injected: its synthesised definition is rejected upstream")
 	}
 }
 

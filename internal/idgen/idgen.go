@@ -49,7 +49,10 @@ var (
 // Session 生成 ses_ 前缀的会话 ID。
 func Session() string { return create("ses") }
 
-// Message 生成 msg_ 前缀的消息 ID(用作 x-opencode-request)。
+// Message 生成 msg_ 前缀的消息 ID。
+//
+// 上游自 2026-10-14 起对 x-opencode-request 一律 403，网关已不再发送该头；
+// 生成器保留给本地追踪/测试使用（见 internal/provider/zen）。
 func Message() string { return create("msg") }
 
 func create(prefix string) string {
@@ -116,8 +119,8 @@ func randomBase62(n int) string {
 //
 // 边界精确到末 3 位:0xfc0 通过、0xfbf 拒绝。
 //
-// 注:x-opencode-request 实测只校验前缀/长度,末 3 位与 counter 无关;
-// 但这里用同一套规则校验,以便网关侧统一处理。
+// 注:x-opencode-request 已停止发送(携带即 403),这里保留同一套校验规则
+// 仅供测试与其他内部用途。
 
 const (
 	// hexLen 是 ID 主体中时间部分的十六进制位数。

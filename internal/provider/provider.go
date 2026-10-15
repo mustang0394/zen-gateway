@@ -1,8 +1,9 @@
 // Package provider 定义上游模块的抽象与公共转发骨架。
 //
 // 每个模块（zen / cline）实现 Provider 接口，差异集中在：
-//   - 上游地址与路径（cline 需要额外的 /v1 前缀）
-//   - 请求头构造（zen 白名单+改写；cline 完全忽略下游头，只发固定头）
+//   - 上游地址与路径（cline 需要额外的 /v1 前缀；zen 还会按 key 切换基址：
+//     匿名免费层走 /inference，Key 层走 /zen）
+//   - 请求头构造（zen 按官方客户端指纹发固定头；cline 完全忽略下游头，只发固定头）
 //   - 请求体改写（zen 强制流式并补齐工具；cline 保持原样）
 //   - 响应判定（zen 仅 429 冷却；cline 有 403 重试与 429 时长解析）
 //
@@ -79,6 +80,16 @@ type Provider interface {
 	ModelOf(body map[string]any) string
 	// Classify 依据状态码与响应体决定处置动作。
 	Classify(status int, body []byte) Decision
+}
+
+// BaseProvider 是可选接口：模块可按 key 选择上游基址。
+//
+// zen 的匿名免费层与 Key 层已不在同一主机（/inference vs /zen），因此需要按
+// key 区分；未实现该接口的模块（如 cline）始终使用 UpstreamBase()。
+// models 端点不走这里：zen 的模型清单仍在 zen 基址上。
+type BaseProvider interface {
+	// UpstreamBaseFor 返回该 key 应使用的上游基址。
+	UpstreamBaseFor(key store.APIKey) string
 }
 
 // ModelsProvider 是可选接口：模块可自定义 models 端点的上游来源与响应格式。
@@ -337,7 +348,7 @@ func (h *Handler) attempt(w http.ResponseWriter, r *http.Request, kind Kind,
 
 	for retry := 0; ; retry++ {
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-			h.P.UpstreamBase()+h.P.PathFor(kind), bytes.NewReader(body))
+			h.baseFor(key)+h.P.PathFor(kind), bytes.NewReader(body))
 		if err != nil {
 			h.recordError(module, model, key.ID, start, "build request: "+err.Error())
 			writeJSONError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -396,6 +407,18 @@ func (h *Handler) attempt(w http.ResponseWriter, r *http.Request, kind Kind,
 		h.recordRequest(module, model, key.ID, resp.StatusCode, start, res, isStream && written == 0)
 		return outcome{action: ActionPass}
 	}
+}
+
+// baseFor 返回该 key 对应的上游基址（POST 转发用）。
+//
+// 模块未实现 BaseProvider，或返回空值时，回落到 UpstreamBase()。
+func (h *Handler) baseFor(key store.APIKey) string {
+	if bp, ok := h.P.(BaseProvider); ok {
+		if base := strings.TrimSpace(bp.UpstreamBaseFor(key)); base != "" {
+			return base
+		}
+	}
+	return h.P.UpstreamBase()
 }
 
 func (h *Handler) backoffFor(retry int) time.Duration {

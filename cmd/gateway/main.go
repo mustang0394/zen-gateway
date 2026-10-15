@@ -10,7 +10,8 @@
 //	ZEN_ADMIN_TOKEN            Web 管理端口令；未设置则不启用管理端
 //	ZEN_DATA_DIR               数据目录（默认 data）
 //	ZEN_DB_PATH                SQLite 文件路径（优先于 ZEN_DATA_DIR）
-//	ZEN_UPSTREAM               zen 模块上游基址
+//	ZEN_UPSTREAM               zen 模块 Key 层上游基址
+//	ZEN_ANONYMOUS_UPSTREAM     zen 模块匿名免费层上游基址（默认 /inference）
 //	ZEN_CLINE_UPSTREAM         cline 模块上游基址
 //	ZEN_RETENTION_DAYS         统计保留天数（默认 30）
 //	ZEN_CLINE_COOLDOWN_FALLBACK cline 429 兜底冷却时长（默认 1h）
@@ -62,7 +63,8 @@ func main() {
 	flag.StringVar(&cfg.Listen, "listen", cfg.Listen, "listen address (overrides ZEN_LISTEN)")
 	flag.StringVar(&cfg.DataDir, "data-dir", cfg.DataDir, "data directory for sqlite database")
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "sqlite database path (overrides -data-dir)")
-	flag.StringVar(&cfg.ZenUpstream, "upstream-zen", cfg.ZenUpstream, "zen upstream base url")
+	flag.StringVar(&cfg.ZenUpstream, "upstream-zen", cfg.ZenUpstream, "zen upstream base url (key tier)")
+	flag.StringVar(&cfg.ZenAnonymousUpstream, "upstream-zen-anonymous", cfg.ZenAnonymousUpstream, "zen upstream base url (anonymous free tier)")
 	flag.StringVar(&cfg.ClineUpstream, "upstream-cline", cfg.ClineUpstream, "cline upstream base url")
 	flag.IntVar(&cfg.RetentionDays, "retention-days", cfg.RetentionDays, "days to keep stats and request logs")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "debug logging")
@@ -97,8 +99,8 @@ func main() {
 	versionsFn := func() provider.Versions {
 		return provider.Versions{Zen: vers.Zen(), ClineCLI: vers.ClineCLI(), ClineSDK: vers.ClineSDK()}
 	}
-	zenProvider := zen.New(cfg.ZenUpstream, inj)
-	// ID 映射（非法 session/request → 合法格式）的后台过期清理
+	zenProvider := zen.New(cfg.ZenUpstream, cfg.ZenAnonymousUpstream, inj)
+	// 非法会话 ID → 合法 ID 的内存映射后台过期清理
 	zenProvider.StartIDSweeper(ctx, idmap.DefaultSweepInterval)
 	zenHandler := provider.NewHandler(zenProvider, provider.Runtime{
 		Store: st, Log: log, Versions: versionsFn,
@@ -143,6 +145,7 @@ func main() {
 		"addr", cfg.Listen,
 		"db", cfg.DatabasePath(),
 		"zenUpstream", cfg.ZenUpstream,
+		"zenAnonymousUpstream", cfg.ZenAnonymousUpstream,
 		"clineUpstream", cfg.ClineUpstream,
 		"admin", admin != nil,
 		"buildVersion", buildVersion,

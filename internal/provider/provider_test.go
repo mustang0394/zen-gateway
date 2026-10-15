@@ -88,7 +88,7 @@ func newHandler(t *testing.T, p provider.Provider, st *store.Store) *testAPI {
 	api := &testAPI{tokens: map[string]string{"cline": "gw-token", "zen": ""}}
 	if p.Name() == "cline" {
 		api.clineH = h
-		api.zenH = provider.NewHandler(zen.New("http://127.0.0.1:1", nil), provider.Runtime{
+		api.zenH = provider.NewHandler(zen.New("http://127.0.0.1:1", "http://127.0.0.1:1", nil), provider.Runtime{
 			Store: st, Log: slog.New(slog.DiscardHandler),
 			Versions: func() provider.Versions { return provider.Versions{Zen: "1.18.31"} },
 		})
@@ -171,18 +171,19 @@ func postJSON(t *testing.T, h http.Handler, path, auth string, body string) *htt
 // ---- zen 模块 -------------------------------------------------------------
 
 func TestZenBuildHeadersRewriteAndDefaults(t *testing.T) {
-	p := zen.New("", nil)
+	p := zen.New("", "", nil)
 	down := http.Header{}
 	down.Set("User-Agent", "evil-client/1.0")
 	down.Set("Cookie", "secret=1")
 	down.Set("x-stainless-arch", "arm64")
 	down.Set("Accept", "text/event-stream")
-	down.Set("x-opencode-project", "myproj")
+	down.Set("x-opencode-project", "prj_0123456789abcdef01234567")
 
 	h := p.BuildHeaders(down, store.APIKey{APIKey: "public", IsAnonymous: true},
-		provider.Versions{Zen: "1.18.31"})
+		provider.Versions{Zen: "2.0.29"})
 
-	if got := h.Get("User-Agent"); got != "opencode/1.18.31" {
+	// UA 形状必须是 opencode/<channel>/<version>/<cli>，1.x 的 opencode/<version> 已失效
+	if got := h.Get("User-Agent"); got != "opencode/latest/2.0.29/cli" {
 		t.Errorf("User-Agent must be overridden, got %q", got)
 	}
 	if h.Get("Cookie") != "" {
@@ -200,11 +201,17 @@ func TestZenBuildHeadersRewriteAndDefaults(t *testing.T) {
 	if got := h.Get("x-opencode-client"); got != "cli" {
 		t.Errorf("x-opencode-client default = %q", got)
 	}
-	if got := h.Get("x-opencode-project"); got != "myproj" {
-		t.Errorf("existing x-opencode-project must be kept, got %q", got)
+	// canonical prj_* 会被上游 403，必须改写为裸 40 位小写 hex
+	if got := h.Get("x-opencode-project"); len(got) != 40 || got == "prj_0123456789abcdef01234567" {
+		t.Errorf("x-opencode-project must be a bare 40hex id, got %q", got)
 	}
-	if h.Get("x-opencode-session") == "" || h.Get("x-opencode-request") == "" {
-		t.Error("session/request IDs must be generated when missing")
+	// 两个会话头必须同值；x-opencode-request 已废弃，绝不上游
+	ses := h.Get("x-opencode-session")
+	if ses == "" || h.Get("x-opencode-session-id") != ses {
+		t.Error("session and session-id must be generated with the same value")
+	}
+	if got := h.Get("x-opencode-request"); got != "" {
+		t.Errorf("x-opencode-request must never be sent, got %q", got)
 	}
 }
 
@@ -258,7 +265,7 @@ func TestZenAuthorizationIsNeverDownstreamValue(t *testing.T) {
 			if tc.down != "" {
 				down.Set("Authorization", tc.down)
 			}
-			h := zen.New("", nil).BuildHeaders(down, tc.key, provider.Versions{Zen: "1.18.31"})
+			h := zen.New("", "", nil).BuildHeaders(down, tc.key, provider.Versions{Zen: "1.18.31"})
 
 			if got := h.Get("Authorization"); got != tc.wantAuth {
 				t.Errorf("Authorization = %q, want %q", got, tc.wantAuth)
@@ -272,37 +279,46 @@ func TestZenAuthorizationIsNeverDownstreamValue(t *testing.T) {
 }
 
 func TestZenPrepareBodyForcesStreamAndTools(t *testing.T) {
-	p := zen.New("", nil)
+	p := zen.New("", "", nil)
 	body := map[string]any{"model": "m", "stream": false}
 	p.PrepareBody(provider.KindChat, body)
 	if body["stream"] != true {
 		t.Error("stream must be forced to true")
 	}
 	tools, _ := body["tools"].([]any)
-	if len(tools) != 2 {
-		t.Fatalf("expected 2 injected tools, got %d", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("expected 5 injected core tools, got %d", len(tools))
 	}
 
-	// 已有 bash 时只补 read
+	// 已有 shell 时只补其余 4 个（已有项保留位置，定义会被真实定义改写）
 	body2 := map[string]any{"tools": []any{
-		map[string]any{"type": "function", "function": map[string]any{"name": "bash"}},
+		map[string]any{"type": "function", "function": map[string]any{
+			"name": "shell", "description": "my own shell",
+			"parameters": map[string]any{"type": "object", "properties": map[string]any{}},
+		}},
 	}}
 	p.PrepareBody(provider.KindChat, body2)
 	tools2, _ := body2["tools"].([]any)
-	if len(tools2) != 2 {
-		t.Fatalf("expected 1 injected tool, got %d", len(tools2)-1)
+	if len(tools2) != 5 {
+		t.Fatalf("expected 5 tools (1 existing + 4 injected), got %d", len(tools2))
 	}
 	names := []string{}
 	for _, tr := range tools2 {
 		names = append(names, tr.(map[string]any)["function"].(map[string]any)["name"].(string))
 	}
-	if names[0] != "bash" || names[1] != "read" {
-		t.Errorf("tools = %v, want [bash read]", names)
+	if names[0] != "shell" {
+		t.Errorf("existing shell tool must stay first, got %v", names)
+	}
+	want := map[string]bool{"shell": true, "edit": true, "glob": true, "grep": true, "read": true}
+	for _, name := range names {
+		if !want[name] {
+			t.Errorf("unexpected injected tool %q (names=%v)", name, names)
+		}
 	}
 }
 
 func TestZenClassifyOnly429(t *testing.T) {
-	p := zen.New("", nil)
+	p := zen.New("", "", nil)
 	if d := p.Classify(http.StatusForbidden, []byte("nope")); d.Action != provider.ActionPass {
 		t.Error("zen must not handle 403")
 	}
@@ -321,7 +337,7 @@ func TestZenClassifyOnly429(t *testing.T) {
 func TestZenEndToEndPassthroughAndStats(t *testing.T) {
 	fake := newFakeUpstream(t, scripted{status: 200, body: `{"choices":[]}`})
 	st := newStore(t)
-	p := zen.New(fake.srv.URL, nil)
+	p := zen.New(fake.srv.URL, fake.srv.URL, nil)
 	h := newHandler(t, p, st)
 
 	rec := postJSON(t, h, "/zen/v1/chat/completions", "",
@@ -346,8 +362,8 @@ func TestZenEndToEndPassthroughAndStats(t *testing.T) {
 	if _, ok := sent["tools"].([]any); !ok {
 		t.Error("upstream body must have tools injected")
 	}
-	// 上游 Header 必须是 opencode UA
-	if ua := calls[0].Header.Get("User-Agent"); ua != "opencode/1.18.31" {
+	// 上游 Header 必须是 opencode/<channel>/<version>/<cli> 形状
+	if ua := calls[0].Header.Get("User-Agent"); ua != "opencode/latest/1.18.31/cli" {
 		t.Errorf("upstream UA = %q", ua)
 	}
 
@@ -640,7 +656,7 @@ func TestAccessTokenEnforced(t *testing.T) {
 func TestZenAllowsAnonymousWhenNoToken(t *testing.T) {
 	fake := newFakeUpstream(t)
 	st := newStore(t)
-	h := newHandler(t, zen.New(fake.srv.URL, nil), st)
+	h := newHandler(t, zen.New(fake.srv.URL, fake.srv.URL, nil), st)
 
 	rec := postJSON(t, h, "/zen/v1/chat/completions", "", `{"model":"m"}`)
 	if rec.Code != 200 {
@@ -680,7 +696,7 @@ func TestResponsesPathBothModules(t *testing.T) {
 
 			var p provider.Provider
 			if tc.mod == "zen" {
-				p = zen.New(fake.srv.URL, nil)
+				p = zen.New(fake.srv.URL, fake.srv.URL, nil)
 			} else {
 				p = cline.New(fake.srv.URL, time.Hour, nil)
 			}
@@ -845,7 +861,7 @@ func TestZenModelsEndpointStillPassesThrough(t *testing.T) {
 	raw := `{"object":"list","data":[{"id":"mimo-v2.5-free","object":"model","created":1,"owned_by":"opencode"}]}`
 	fake := newFakeUpstream(t, scripted{status: 200, body: raw})
 	st := newStore(t)
-	h := newHandler(t, zen.New(fake.srv.URL, nil), st)
+	h := newHandler(t, zen.New(fake.srv.URL, fake.srv.URL, nil), st)
 
 	req := httptest.NewRequest(http.MethodGet, "/zen/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -908,7 +924,7 @@ func TestProxyPerKey(t *testing.T) {
 func TestLargeBodyLimit(t *testing.T) {
 	fake := newFakeUpstream(t)
 	st := newStore(t)
-	h := newHandler(t, zen.New(fake.srv.URL, nil), st)
+	h := newHandler(t, zen.New(fake.srv.URL, fake.srv.URL, nil), st)
 
 	big := bytes.Repeat([]byte("a"), provider.MaxBodyBytes+1024)
 	body := `{"model":"m","x":"` + string(big) + `"}`
@@ -924,7 +940,7 @@ func TestModelsRequestIsCountedInStats(t *testing.T) {
 	fake := newFakeUpstream(t, scripted{status: 200, body: `{"object":"list","data":[]}`})
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "zen", APIKey: "public", Enabled: true, IsAnonymous: true})
-	h := newHandler(t, zen.New(fake.srv.URL, nil), st)
+	h := newHandler(t, zen.New(fake.srv.URL, fake.srv.URL, nil), st)
 
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/zen/v1/models", nil)
@@ -955,7 +971,7 @@ func TestUpstreamFailureIsCountedAsError(t *testing.T) {
 	st := newStore(t)
 	st.CreateKey(store.APIKey{Module: "zen", APIKey: "public", Enabled: true, IsAnonymous: true})
 	// 指向一个不监听的端口
-	h := newHandler(t, zen.New("http://127.0.0.1:1", nil), st)
+	h := newHandler(t, zen.New("http://127.0.0.1:1", "http://127.0.0.1:1", nil), st)
 
 	rec := postJSON(t, h, "/zen/v1/chat/completions", "", `{"model":"m"}`)
 	if rec.Code != http.StatusBadGateway {

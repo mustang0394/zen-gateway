@@ -15,46 +15,61 @@ import (
 
 func newProvider(t *testing.T) *Provider {
 	t.Helper()
-	return New("", nil)
+	return New("", "", nil)
 }
 
 func buildHeaders(t *testing.T, down http.Header) http.Header {
 	t.Helper()
 	p := newProvider(t)
 	return p.BuildHeaders(down, store.APIKey{APIKey: "public", IsAnonymous: true},
-		provider.Versions{Zen: "1.18.34"})
+		provider.Versions{Zen: "2.0.29"})
 }
 
 // TestValidDownstreamIDsArePreserved 验证下游的合法 ID 被原样保留
 // （保住客户端自己的 session 语义与上游 prompt 缓存）。
 func TestValidDownstreamIDsArePreserved(t *testing.T) {
 	ses := "ses_ef5920720ffeDse8BpbCnsgiMT"
-	msg := "msg_ef5920720ffc83HCMpIIJDrDdM"
 
-	down := http.Header{}
-	down.Set("x-opencode-session", ses)
-	down.Set("x-opencode-request", msg)
-	h := buildHeaders(t, down)
+	for _, header := range []string{"x-opencode-session", "x-opencode-session-id"} {
+		t.Run(header, func(t *testing.T) {
+			down := http.Header{}
+			down.Set(header, ses)
+			h := buildHeaders(t, down)
 
-	if got := h.Get("x-opencode-session"); got != ses {
-		t.Errorf("valid session must be preserved, got %q", got)
-	}
-	if got := h.Get("x-opencode-request"); got != msg {
-		t.Errorf("valid request must be preserved, got %q", got)
+			if got := h.Get("x-opencode-session"); got != ses {
+				t.Errorf("valid session must be preserved, got %q", got)
+			}
+			if got := h.Get("x-opencode-session-id"); got != ses {
+				t.Errorf("session-id must mirror the session, got %q", got)
+			}
+		})
 	}
 }
 
-// TestMissingIDsAreGenerated 验证下游未传时生成合法 ID。
+// TestMissingIDsAreGenerated 验证下游未传时生成合法 ID，且四个会话头同值。
 func TestMissingIDsAreGenerated(t *testing.T) {
 	h := buildHeaders(t, http.Header{})
 
 	ses := h.Get("x-opencode-session")
 	if !idgen.IsSession(ses) {
-		t.Errorf("generated session is not valid: %q", ses)
+		t.Fatalf("generated session is not valid: %q", ses)
 	}
-	msg := h.Get("x-opencode-request")
-	if !idgen.IsMessage(msg) {
-		t.Errorf("generated request is not valid: %q", msg)
+	for _, header := range []string{"x-opencode-session-id", "x-session-affinity", "X-Session-Id"} {
+		if got := h.Get(header); got != ses {
+			t.Errorf("%s = %q, want the same session %q", header, got, ses)
+		}
+	}
+}
+
+// TestRequestHeaderIsNeverSent 锁定已废弃的 x-opencode-request：
+// 2026-10-14 起携带该头一律 403，因此不论下游传什么都不能出现在上游请求里。
+func TestRequestHeaderIsNeverSent(t *testing.T) {
+	down := http.Header{}
+	down.Set("x-opencode-request", "msg_ef5920720ffc83HCMpIIJDrDdM")
+	h := buildHeaders(t, down)
+
+	if got := h.Get("x-opencode-request"); got != "" {
+		t.Errorf("x-opencode-request must never be forwarded, got %q", got)
 	}
 }
 
@@ -77,6 +92,24 @@ func TestInvalidSessionIsMappedToValidID(t *testing.T) {
 	}
 }
 
+// TestInvalidSessionIDHeaderIsMapped 验证非法 ID 出现在 x-opencode-session-id
+// （2.x 客户端的头名）时同样会被映射。
+func TestInvalidSessionIDHeaderIsMapped(t *testing.T) {
+	uuid := "550e8400-e29b-41d4-a716-446655440000"
+	down := http.Header{}
+	down.Set("x-opencode-session-id", uuid)
+
+	h := buildHeaders(t, down)
+	got := h.Get("x-opencode-session-id")
+
+	if got == uuid || !idgen.IsSession(got) {
+		t.Errorf("invalid session-id must be mapped to a valid id, got %q", got)
+	}
+	if h.Get("x-opencode-session") != got {
+		t.Error("both session headers must carry the same id")
+	}
+}
+
 // TestInvalidSessionMappingIsStable 验证同一非法值稳定映射到同一个合法 ID
 // —— 这样上游 session 不会每请求都变，缓存得以保留。
 func TestInvalidSessionMappingIsStable(t *testing.T) {
@@ -88,7 +121,7 @@ func TestInvalidSessionMappingIsStable(t *testing.T) {
 		down := http.Header{}
 		down.Set("x-opencode-session", uuid)
 		got := p.BuildHeaders(down, store.APIKey{APIKey: "public"},
-			provider.Versions{Zen: "1.18.34"}).Get("x-opencode-session")
+			provider.Versions{Zen: "2.0.29"}).Get("x-opencode-session")
 
 		if !idgen.IsSession(got) {
 			t.Fatalf("iteration %d: invalid mapped id %q", i, got)
@@ -119,7 +152,7 @@ func TestDifferentInvalidValuesGetDifferentMappings(t *testing.T) {
 		down := http.Header{}
 		down.Set("x-opencode-session", raw)
 		got := p.BuildHeaders(down, store.APIKey{APIKey: "public"},
-			provider.Versions{Zen: "1.18.34"}).Get("x-opencode-session")
+			provider.Versions{Zen: "2.0.29"}).Get("x-opencode-session")
 
 		if !idgen.IsSession(got) {
 			t.Fatalf("mapped id for %q is invalid: %q", raw, got)
@@ -130,56 +163,6 @@ func TestDifferentInvalidValuesGetDifferentMappings(t *testing.T) {
 			}
 		}
 		seen[raw] = got
-	}
-}
-
-// TestInvalidRequestIsMapped 验证 x-opencode-request 也走同一套映射逻辑。
-func TestInvalidRequestIsMapped(t *testing.T) {
-	p := newProvider(t)
-	raw := "550e8400-e29b-41d4-a716-446655440000"
-
-	var first string
-	for i := 0; i < 5; i++ {
-		down := http.Header{}
-		down.Set("x-opencode-request", raw)
-		got := p.BuildHeaders(down, store.APIKey{APIKey: "public"},
-			provider.Versions{Zen: "1.18.34"}).Get("x-opencode-request")
-
-		if !idgen.IsMessage(got) {
-			t.Fatalf("mapped request id is invalid: %q", got)
-		}
-		if i == 0 {
-			first = got
-			continue
-		}
-		if got != first {
-			t.Fatalf("request mapping should be stable: %q → %q", first, got)
-		}
-	}
-}
-
-// TestSessionAndMessageMappingsAreIndependent 验证两个头不串用映射
-// （同一个原始值出现在两个头时，应各自映射到对应前缀的 ID）。
-func TestSessionAndMessageMappingsAreIndependent(t *testing.T) {
-	p := newProvider(t)
-	raw := "same-raw-value"
-
-	down := http.Header{}
-	down.Set("x-opencode-session", raw)
-	down.Set("x-opencode-request", raw)
-	h := p.BuildHeaders(down, store.APIKey{APIKey: "public"},
-		provider.Versions{Zen: "1.18.34"})
-
-	ses := h.Get("x-opencode-session")
-	msg := h.Get("x-opencode-request")
-	if !idgen.IsSession(ses) {
-		t.Errorf("session should be ses_ format, got %q", ses)
-	}
-	if !idgen.IsMessage(msg) {
-		t.Errorf("request should be msg_ format, got %q", msg)
-	}
-	if ses == msg {
-		t.Error("session and request mappings must not be shared")
 	}
 }
 
@@ -206,11 +189,11 @@ func TestMappingExpiresAfterTTL(t *testing.T) {
 		down := http.Header{}
 		down.Set("x-opencode-session", raw)
 		return p.BuildHeaders(down, store.APIKey{APIKey: "public"},
-			provider.Versions{Zen: "1.18.34"}).Get("x-opencode-session")
+			provider.Versions{Zen: "2.0.29"}).Get("x-opencode-session")
 	}
 
 	// 情形一：TTL 足够长 → 连续调用稳定复用
-	long := NewWithTTL("", nil, time.Hour)
+	long := NewWithTTL("", "", nil, time.Hour)
 	first := header(long)
 	for i := 0; i < 5; i++ {
 		if got := header(long); got != first {
@@ -219,7 +202,7 @@ func TestMappingExpiresAfterTTL(t *testing.T) {
 	}
 
 	// 情形二：TTL 极短 + 明确超过 → 应重新生成
-	short := NewWithTTL("", nil, 20*time.Millisecond)
+	short := NewWithTTL("", "", nil, 20*time.Millisecond)
 	a := header(short)
 
 	// 等到「距上次访问 > TTL」且留出宽裕余量，避免依赖精确调度
@@ -238,14 +221,14 @@ func TestMappingExpiresAfterTTL(t *testing.T) {
 
 // TestSweeperRemovesExpired 验证后台清理协程能回收条目。
 func TestSweeperRemovesExpired(t *testing.T) {
-	p := NewWithTTL("", nil, 20*time.Millisecond)
+	p := NewWithTTL("", "", nil, 20*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	p.StartIDSweeper(ctx, 10*time.Millisecond)
 
 	down := http.Header{}
 	down.Set("x-opencode-session", "some-invalid-id")
-	p.BuildHeaders(down, store.APIKey{APIKey: "public"}, provider.Versions{Zen: "1.18.34"})
+	p.BuildHeaders(down, store.APIKey{APIKey: "public"}, provider.Versions{Zen: "2.0.29"})
 
 	if p.sessions.Len() != 1 {
 		t.Fatalf("expected 1 mapping, got %d", p.sessions.Len())
@@ -279,7 +262,7 @@ func TestConcurrentBuildHeadersIsStable(t *testing.T) {
 				down := http.Header{}
 				down.Set("x-opencode-session", raw)
 				out = append(out, p.BuildHeaders(down, store.APIKey{APIKey: "public"},
-					provider.Versions{Zen: "1.18.34"}).Get("x-opencode-session"))
+					provider.Versions{Zen: "2.0.29"}).Get("x-opencode-session"))
 			}
 			results[i] = out
 		}(i)
@@ -305,7 +288,7 @@ func TestNilMapsFallBackToGenerating(t *testing.T) {
 	down := http.Header{}
 	down.Set("x-opencode-session", "invalid-id")
 
-	h := p.BuildHeaders(down, store.APIKey{APIKey: "public"}, provider.Versions{Zen: "1.18.34"})
+	h := p.BuildHeaders(down, store.APIKey{APIKey: "public"}, provider.Versions{Zen: "2.0.29"})
 	if got := h.Get("x-opencode-session"); !idgen.IsSession(got) {
 		t.Errorf("should fall back to generating a valid id, got %q", got)
 	}
@@ -322,13 +305,10 @@ func TestSessionTTLIsOneHour(t *testing.T) {
 // （否则映射表会被无意义的空键撑大）。
 func TestMissingIDNotStoredInMap(t *testing.T) {
 	p := newProvider(t)
-	p.BuildHeaders(http.Header{}, store.APIKey{APIKey: "public"}, provider.Versions{Zen: "1.18.34"})
+	p.BuildHeaders(http.Header{}, store.APIKey{APIKey: "public"}, provider.Versions{Zen: "2.0.29"})
 
 	if n := p.sessions.Len(); n != 0 {
 		t.Errorf("missing session header should not create a mapping, got %d", n)
-	}
-	if n := p.messages.Len(); n != 0 {
-		t.Errorf("missing request header should not create a mapping, got %d", n)
 	}
 }
 
@@ -337,14 +317,14 @@ func TestExistingValidIDNotStoredInMap(t *testing.T) {
 	p := newProvider(t)
 	down := http.Header{}
 	down.Set("x-opencode-session", "ses_ef5920720ffeDse8BpbCnsgiMT")
-	p.BuildHeaders(down, store.APIKey{APIKey: "public"}, provider.Versions{Zen: "1.18.34"})
+	p.BuildHeaders(down, store.APIKey{APIKey: "public"}, provider.Versions{Zen: "2.0.29"})
 
 	if n := p.sessions.Len(); n != 0 {
 		t.Errorf("valid id needs no mapping, got %d entries", n)
 	}
 }
 
-// TestTruncatedAndUpperCaseSessionsAreMapped 覆盖各类"看起来像但不合法"的值。
+// TestTruncatedAndUpperCaseSessionsAreMapped 覆盖各类“看起来像但不合法”的值。
 func TestTruncatedAndUpperCaseSessionsAreMapped(t *testing.T) {
 	cases := map[string]string{
 		"hex 大写":     "ses_EF5920720FFEDse8BpbCnsgiMT",
@@ -357,7 +337,7 @@ func TestTruncatedAndUpperCaseSessionsAreMapped(t *testing.T) {
 		down := http.Header{}
 		down.Set("x-opencode-session", raw)
 		got := p.BuildHeaders(down, store.APIKey{APIKey: "public"},
-			provider.Versions{Zen: "1.18.34"}).Get("x-opencode-session")
+			provider.Versions{Zen: "2.0.29"}).Get("x-opencode-session")
 
 		if !idgen.IsSession(got) {
 			t.Errorf("%s (%q): mapped to invalid %q", label, raw, got)

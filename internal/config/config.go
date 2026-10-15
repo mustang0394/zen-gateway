@@ -16,14 +16,15 @@ import (
 
 // 环境变量名。
 const (
-	EnvListen      = "ZEN_LISTEN"
-	EnvAdminToken  = "ZEN_ADMIN_TOKEN"
-	EnvDataDir     = "ZEN_DATA_DIR"
-	EnvDBPath      = "ZEN_DB_PATH"
-	EnvZenUpstream = "ZEN_UPSTREAM"
-	EnvClineUpstrm = "ZEN_CLINE_UPSTREAM"
-	EnvRetention   = "ZEN_RETENTION_DAYS"
-	EnvClineCool   = "ZEN_CLINE_COOLDOWN_FALLBACK"
+	EnvListen       = "ZEN_LISTEN"
+	EnvAdminToken   = "ZEN_ADMIN_TOKEN"
+	EnvDataDir      = "ZEN_DATA_DIR"
+	EnvDBPath       = "ZEN_DB_PATH"
+	EnvZenUpstream  = "ZEN_UPSTREAM"
+	EnvZenAnonymous = "ZEN_ANONYMOUS_UPSTREAM"
+	EnvClineUpstrm  = "ZEN_CLINE_UPSTREAM"
+	EnvRetention    = "ZEN_RETENTION_DAYS"
+	EnvClineCool    = "ZEN_CLINE_COOLDOWN_FALLBACK"
 )
 
 // Config 是进程级配置。
@@ -36,8 +37,10 @@ type Config struct {
 	DBPath string
 	// AdminToken 是 Web 管理端口令；为空则管理端不启用。
 	AdminToken string
-	// ZenUpstream 是 zen 模块上游基址。
+	// ZenUpstream 是 zen 模块 Key 层上游基址。
 	ZenUpstream string
+	// ZenAnonymousUpstream 是 zen 模块匿名免费层上游基址（与 Key 层不同主机）。
+	ZenAnonymousUpstream string
 	// ClineUpstream 是 cline 模块上游基址。
 	ClineUpstream string
 	// RetentionDays 是统计与明细的保留天数。
@@ -54,6 +57,7 @@ func Defaults() Config {
 		Listen:                ":8080",
 		DataDir:               "data",
 		ZenUpstream:           "https://opencode.ai/zen/v1",
+		ZenAnonymousUpstream:  "https://opencode.ai/inference/v1",
 		ClineUpstream:         "https://api.cline.bot/api/v1",
 		RetentionDays:         30,
 		ClineCooldownFallback: time.Hour,
@@ -78,6 +82,9 @@ func Load() Config {
 	}
 	if v := strings.TrimSpace(os.Getenv(EnvZenUpstream)); v != "" {
 		c.ZenUpstream = v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvZenAnonymous)); v != "" {
+		c.ZenAnonymousUpstream = v
 	}
 	if v := strings.TrimSpace(os.Getenv(EnvClineUpstrm)); v != "" {
 		c.ClineUpstream = v

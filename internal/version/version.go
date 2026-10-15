@@ -2,7 +2,8 @@
 //
 // 三个版本目标：
 //
-//	zen        opencode 正式 release 的 semver（v1.18.31 → 1.18.31）
+//	zen        opencode 正式 release 的 semver（v2.0.29 → 2.0.29），
+//	           用于 User-Agent 的 opencode/<channel>/<version>/cli 形状
 //	cline.cli  cline 主版本 tag（v4.1.22 → 4.1.22），用于 X-CLIENT-VERSION /
 //	           X-PLATFORM-VERSION / User-Agent
 //	cline.sdk  cline SDK tag（sdk/sdk/v0.0.90 → 0.0.90），用于 X-CORE-VERSION
@@ -49,8 +50,10 @@ func DefaultTargets() Targets {
 }
 
 // 兜底值：GitHub 不可达时保证 UA / header 仍可构造。
+// zen 兜底值跟随网关镜像的官方客户端版本（当前 CLI 2.0.29）；
+// 上游只校验 UA 形状而不校验版本号，但保持 2.x 更贴近真实客户端。
 var fallback = map[string]string{
-	NameZen:      "1.18.31",
+	NameZen:      "2.0.29",
 	NameClineCLI: "4.1.22",
 	NameClineSDK: "0.0.90",
 }

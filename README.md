@@ -4,7 +4,8 @@
 **Key 池管理、顺序轮询、冷却池与用量统计**，配套 Web 管理端。
 
 ```
-OpenAI 客户端 ──┬──► /zen/v1/*   ──► zen 模块   ──► opencode.ai/zen/v1
+OpenAI 客户端 ──┬──► /zen/v1/*   ──► zen 模块   ──┬──► opencode.ai/zen/v1（Key 层）
+                │                                └──► opencode.ai/inference/v1（匿名免费层）
                 └──► /cline/v1/* ──► cline 模块 ──► api.cline.bot/api/v1
                                           │
                           浏览器 ──► /admin（Web 管理端）
@@ -167,30 +168,43 @@ ID 的命名空间前缀，与官方 `/v1/models` 惯例一致）；`name` 与 `
 
 ### zen 模块
 
-上游会校验请求是否来自 opencode 官方客户端，不满足即返回
+上游按**客户端指纹**判定请求是否来自 opencode 官方客户端，不满足即返回
 `FreeTierError: OpenCode's free tier can only be used from within OpenCode`。
-网关透明补齐全部要素：
+2026-10-14 起该链路升级为逐项比对 opencode 2.x（CLI 2.0.29）真实发出的请求
+（对照客户端 `packages/core/src/session/model-request.ts` 与 `packages/core/src/app.ts`），
+旧形状（`opencode/<版本>` UA、`x-opencode-request`、canonical `prj_*` project）全部失效。
+因此网关不再透传下游头，而是按官方客户端的头集合**重建**发往上游的头：
 
 | 上游校验项 | 网关处理 |
 |---|---|
-| `User-Agent: opencode/<semver>` | 每日从 GitHub 同步最新版本号,无条件覆盖客户端值。上游只要求**以 `opencode/` 开头**(纯 `opencode`、`curl`、`python-requests` 等一律 403)|
-| `x-opencode-session` | 格式严格校验（见下）：合法则保留，非法则映射为网关生成的合法 ID |
-| `x-opencode-request` | 同上（上游实测不校验该头，网关统一处理以保持一致） |
-| `x-opencode-client` / `x-opencode-project` | 缺失时补 `cli` / `global` |
+| `User-Agent` | 强制 `opencode/<channel>/<version>/cli`，版本号每日从 GitHub 同步（旧形状 `opencode/<版本>` 一律 403） |
+| `x-opencode-session` 与 `x-opencode-session-id` | 两个头必须**同值**：合法值保留，非法值（如 UUID）映射为网关生成的合法 ID（见下） |
+| `x-session-affinity` / `X-Session-Id` | 与上面两个头同值（官方客户端同样携带，网关一并补齐） |
+| `x-opencode-project` | 改写为**裸 40 位小写 hex**（canonical `prj_*` 会 403）；按下游 project 信号哈希，同一会话稳定落同一 project |
+| `x-opencode-client` | 强制 `cli` |
+| `x-opencode-request` | **不再发送**：该头已废弃，携带即 403 |
 | `Authorization` | **完全由池中 Key 决定**，不透传下游值；未配 Key（匿名）时用 `Bearer public` |
-| 请求体 `tools` 含 `bash` 与 `read` | 缺失的以最小 schema 注入（chat 与 responses 两种结构分别处理） |
 | `stream: true` | 强制改写为流式，并原样转发上游 SSE |
+| 请求体 `tools` | 必须含核心工具 `shell`/`edit`/`glob`/`grep`/`read`，且**定义与官方逐字节一致**：网关内嵌从官方 CLI 抓取的真实定义（`internal/provider/zen/opencode_tools.json`），下游声明的同名工具会被改写为真实定义，未识别的工具名原样保留 |
 
-另外执行安全转发策略：**请求头白名单**（仅 `Accept`、`Content-Type`、`User-Agent`
-与 `x-opencode-*` 透传，Cookie、`x-stainless-*`、`Authorization` 等一律丢弃）；请求体经
-`json.Decoder.UseNumber` 处理，重编码不丢失数字精度。
+**匿名免费层与 Key 层已不在同一主机**，网关按 Key 是否为匿名自动选择上游：
+
+| 层 | 上游基址 | 凭据 |
+|---|---|---|
+| Key 层（池中配置了 Key） | `https://opencode.ai/zen/v1`（`ZEN_UPSTREAM`） | `Bearer <池中 Key>` |
+| 匿名免费层（池中无可用 Key） | `https://opencode.ai/inference/v1`（`ZEN_ANONYMOUS_UPSTREAM`） | `Bearer public` |
+
+keyless 流量已从 `/zen` 迁到 `/inference`：控制台代理会摘掉匿名请求的 Authorization，
+新网关据此判为非官方客户端。`GET /v1/models` 仍在 zen 基址上（该清单接口是公开的）。
+
+请求体经 `json.Decoder.UseNumber` 处理，重编码不丢失数字精度。
 
 > `Authorization` 不透传是有意为之：下游携带的是**网关自己的接入 Token**，
 > 与上游凭据无关。早期实现会沿用下游值，导致配置接入 Token 后网关 Token 被当作
 > 上游 key 发送，上游一律返回 `401 Invalid API key`（已修复）。若需要客户端自带
 > 上游 Key，请将其配置到池中而非从下游传入。
 
-### 客户端 ID 校验与映射（session / request）
+### 客户端 ID 校验与映射（会话 ID）
 
 上游免费层会**严格校验** `x-opencode-session` 的结构**与时间戳低 12 位(counter)边界**,
 不符合即返回 `FreeTierError: OpenCode's free tier can only be used from within OpenCode`。
@@ -199,14 +213,14 @@ ID 的命名空间前缀，与官方 `/v1/models` 惯例一致）；`name` 与 `
 | 下游传入 | 网关行为 |
 |---|---|
 | 未传该头 | 生成一个合法 ID |
-| **合法**的 `ses_`/`msg_` ID | **原样保留**（保住客户端自己的会话与上游缓存） |
+| **合法**的 `ses_` ID | **原样保留**（保住客户端自己的会话与上游缓存） |
 | **非法**值（如 UUID） | 按原值映射到网关生成的合法 ID；同一原值在 TTL 内稳定复用同一 ID |
 
 合法格式(实测,大小写、长度与**counter 边界**都必须精确):
 
 ```
-x-opencode-session: ses_ + 12 位小写 hex + 14 位 base62   共 30 字符
-x-opencode-request: msg_ + 12 位小写 hex + 14 位 base62   共 30 字符
+x-opencode-session / x-opencode-session-id:
+    ses_ + 12 位小写 hex + 14 位 base62   共 30 字符
 ```
 
 其中前 12 位 hex 是 **descending 时间戳**(`~ (ts_ms * 0x1000 + counter)` 的低 48 位)。
@@ -229,6 +243,10 @@ x-opencode-request: msg_ + 12 位小写 hex + 14 位 base62   共 30 字符
 > sessionId）会发送 UUID 形态的值，实测会被上游判定为非官方客户端并 403。
 > 若简单地对每个请求重新生成 ID，上游会话每次都在变、prompt 缓存前缀失效；
 > 因此按原始值建立映射，使同一客户端会话始终得到同一个合法 ID。
+
+下游的会话 ID 可以出现在 `x-opencode-session`、`x-opencode-session-id`（2.x 客户端的头名）、
+`x-session-affinity` 或 `X-Session-Id` 中，网关取**第一个非空值**；发往上游时四个头都会被
+写成同一个合法 ID。
 
 映射特性：
 
@@ -263,7 +281,7 @@ x-opencode-request: msg_ + 12 位小写 hex + 14 位 base62   共 30 字符
 
 | 目标 | 来源 | 用途 |
 |---|---|---|
-| `zen` | `anomalyco/opencode` 最新正式 release（`v1.18.34` → `1.18.34`） | `User-Agent: opencode/<v>` |
+| `zen` | `anomalyco/opencode` 最新正式 release（`v2.0.29` → `2.0.29`） | `User-Agent: opencode/latest/<v>/cli` |
 | `cline.cli` | `cline/cline` 发布列表中最大的 `v*`（排除 `cli-v*`、`desktop-v*`、`sdk/*`、预发布） | `X-CLIENT-VERSION`、`X-PLATFORM-VERSION`、`User-Agent` |
 | `cline.sdk` | 同上列表中最大的 `sdk/sdk/v*` | `X-CORE-VERSION` |
 
@@ -373,7 +391,8 @@ x-opencode-request: msg_ + 12 位小写 hex + 14 位 base62   共 30 字符
 | `ZEN_ADMIN_TOKEN` | — | Web 管理端口令；**未设置则禁用管理端** |
 | `ZEN_DATA_DIR` | `data` | 数据目录（存放 SQLite） |
 | `ZEN_DB_PATH` | `<data-dir>/gateway.db` | SQLite 文件路径（优先于 `ZEN_DATA_DIR`） |
-| `ZEN_UPSTREAM` | `https://opencode.ai/zen/v1` | zen 上游基址 |
+| `ZEN_UPSTREAM` | `https://opencode.ai/zen/v1` | zen 模块 Key 层上游基址 |
+| `ZEN_ANONYMOUS_UPSTREAM` | `https://opencode.ai/inference/v1` | zen 模块匿名免费层上游基址 |
 | `ZEN_CLINE_UPSTREAM` | `https://api.cline.bot/api/v1` | cline 上游基址（含 `/v1`，与 zen 对称） |
 | `ZEN_RETENTION_DAYS` | `30` | 统计与请求明细保留天数 |
 | `ZEN_CLINE_COOLDOWN_FALLBACK` | `1h` | cline 429 无法解析时长时的兜底冷却 |
@@ -385,7 +404,8 @@ x-opencode-request: msg_ + 12 位小写 hex + 14 位 base62   共 30 字符
 | `-listen` | `:8080` | 监听地址（覆盖 `ZEN_LISTEN`） |
 | `-data-dir` | `data` | 数据目录 |
 | `-db` | — | SQLite 路径（覆盖 `-data-dir`） |
-| `-upstream-zen` | 见上 | zen 上游基址 |
+| `-upstream-zen` | 见上 | zen 模块 Key 层上游基址 |
+| `-upstream-zen-anonymous` | 见上 | zen 模块匿名免费层上游基址 |
 | `-upstream-cline` | 见上 | cline 上游基址（含 `/v1`） |
 | `-retention-days` | `30` | 统计保留天数 |
 | `-verbose` | off | 调试日志 |
@@ -515,7 +535,7 @@ zen-gateway/
 │   ├── config/            # 进程级配置（flag > env > 默认）
 │   ├── store/             # SQLite 持久化：迁移、DAO、统计批量落盘
 │   ├── provider/          # 上游模块抽象与公共转发骨架
-│   │   ├── zen/           # zen：头改写、tools 注入、stream 强制、429→次日 0 点
+│   │   ├── zen/           # zen：客户端指纹头、真实工具定义、按层选上游、429→次日 0 点
 │   │   └── cline/         # cline：固定头、403 重试、429 时长解析
 │   ├── cooldown/          # 冷却池服务与数据保留策略
 │   ├── inject/            # 系统提示词注入（关键词检测 + 整体替换）
