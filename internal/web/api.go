@@ -540,7 +540,7 @@ func (s *Server) handleVersions(w http.ResponseWriter, r *http.Request) {
 		"current": s.vers.Snapshot(),
 		"records": list,
 		"names":   version.Names(),
-		"zenUses": "User-Agent: opencode/<version>",
+		"zenUses": "User-Agent: opencode/<channel>/<version>/cli",
 		"clineUses": []string{
 			"X-CLIENT-VERSION / X-PLATFORM-VERSION / User-Agent: Cline/<version>",
 			"X-CORE-VERSION: <sdk version>",
@@ -553,7 +553,15 @@ func (s *Server) handleVersionRefresh(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	results := s.vers.Refresh(r.Context())
+	// results 必须按 names 的顺序返回**数组**:管理端会对每一项读 OK/Name
+	// (map 形态下 items.filter 不存在,前端会报“刷新失败”)——见 TestVersionRefreshReturnsArray。
+	byName := s.vers.Refresh(r.Context())
+	results := make([]store.Version, 0, len(byName))
+	for _, name := range version.Names() {
+		if v, ok := byName[name]; ok {
+			results = append(results, v)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 

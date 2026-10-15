@@ -9,7 +9,7 @@ import { ApiError, api } from "@/lib/api";
 import { fmtTime } from "@/lib/utils";
 
 const LABELS: Record<string, { title: string; usage: string }> = {
-  "zen": { title: "OpenCode Zen", usage: "User-Agent: opencode/<版本>" },
+  "zen": { title: "OpenCode Zen", usage: "User-Agent: opencode/latest/<版本>/cli" },
   "cline.cli": {
     title: "Cline CLI",
     usage: "X-CLIENT-VERSION / X-PLATFORM-VERSION / User-Agent: Cline/<版本>",

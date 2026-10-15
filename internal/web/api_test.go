@@ -441,3 +441,51 @@ func jsonNumber(v int64) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+// TestVersionRefreshReturnsArray 锁定 POST /admin/api/versions/refresh 的响应形状:
+// 前端按数组遍历 results 并读取每项的 OK/Name(map 形态会让 items.filter 不存在,
+// 管理端“立即刷新”会直接报“刷新失败”)。
+func TestVersionRefreshReturnsArray(t *testing.T) {
+	srv, _ := newServer(t)
+
+	rec := call(t, srv, http.MethodPost, "/admin/api/versions/refresh", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	payload := decode(t, rec)
+	raw, ok := payload["results"].([]any)
+	if !ok {
+		t.Fatalf("results must be a JSON array, got %T (%v)", payload["results"], payload["results"])
+	}
+	if len(raw) != len(version.Names()) {
+		t.Fatalf("results has %d entries, want %d (names=%v)", len(raw), len(version.Names()), version.Names())
+	}
+	seen := map[string]bool{}
+	for _, item := range raw {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("results entry is not an object: %T", item)
+		}
+		name, _ := entry["Name"].(string)
+		if name == "" {
+			t.Errorf("results entry has no Name: %v", entry)
+		}
+		if _, ok := entry["OK"].(bool); !ok {
+			t.Errorf("results entry %q has no boolean OK: %v", name, entry)
+		}
+		seen[name] = true
+	}
+	for _, name := range version.Names() {
+		if !seen[name] {
+			t.Errorf("results is missing target %q", name)
+		}
+	}
+}
+
+// TestVersionRefreshRejectsGET 验证刷新只能 POST。
+func TestVersionRefreshRejectsGET(t *testing.T) {
+	srv, _ := newServer(t)
+	if rec := call(t, srv, http.MethodGet, "/admin/api/versions/refresh", "", true); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /versions/refresh = %d, want 405", rec.Code)
+	}
+}
