@@ -1,15 +1,20 @@
-// Package version 负责从 GitHub 抓取各上游所需的版本号，并每日刷新。
+// Package version 负责从上游抓取各上游所需的版本号,并每日刷新。
 //
-// 三个版本目标：
+// 三个版本目标:
 //
-//	zen        opencode 正式 release 的 semver（v2.0.29 → 2.0.29），
+//	zen        opencode 客户端的 semver(v2.0.29 → 2.0.29),
 //	           用于 User-Agent 的 opencode/<channel>/<version>/cli 形状
-//	cline.cli  cline 主版本 tag（v4.1.22 → 4.1.22），用于 X-CLIENT-VERSION /
+//	cline.cli  cline 主版本 tag(v4.1.22 → 4.1.22),用于 X-CLIENT-VERSION /
 //	           X-PLATFORM-VERSION / User-Agent
-//	cline.sdk  cline SDK tag（sdk/sdk/v0.0.90 → 0.0.90），用于 X-CORE-VERSION
+//	cline.sdk  cline SDK tag(sdk/sdk/v0.0.90 → 0.0.90),用于 X-CORE-VERSION
 //
-// cline 仓库的 tag 存在多个前缀（desktop-v*、cli-v*、sdk/sdk/v*、v*），
-// 因此不能使用 /releases/latest，必须拉取发布列表后按 tag 形态分类并取最大版本。
+// 两个仓库的发布形态不同,抓取也分开:
+//   - opencode 自 2.x 起只打 git tag、不再发 GitHub Release,GitHub 的
+//     /releases/latest 至今仍停在 1.x。因此 zen 优先取 npm 包 @opencode/cli 的
+//     latest dist-tag(该 tag 即官方 CLI 的发布号),再依次回落
+//     GitHub releases/latest 与最新 semver tag。
+//   - cline 仓库的 tag 存在多个前缀(desktop-v*、cli-v*、sdk/sdk/v*、v*),
+//     因此不能使用 /releases/latest,必须拉取发布列表后按 tag 形态分类并取最大版本。
 package version
 
 import (
@@ -42,11 +47,13 @@ func Names() []string { return []string{NameZen, NameClineCLI, NameClineSDK} }
 type Targets struct {
 	OpencodeRepo string // 默认 anomalyco/opencode
 	ClineRepo    string // 默认 cline/cline
+	// OpencodePackage 是 opencode 官方 CLI 的 npm 包名;zen 版本号的权威来源。
+	OpencodePackage string // 默认 @opencode/cli
 }
 
 // DefaultTargets 返回默认抓取配置。
 func DefaultTargets() Targets {
-	return Targets{OpencodeRepo: "anomalyco/opencode", ClineRepo: "cline/cline"}
+	return Targets{OpencodeRepo: "anomalyco/opencode", ClineRepo: "cline/cline", OpencodePackage: "@opencode/cli"}
 }
 
 // 兜底值：GitHub 不可达时保证 UA / header 仍可构造。
@@ -212,10 +219,27 @@ func (m *Manager) latestRelease(ctx context.Context, repo string) (release, erro
 	return r, nil
 }
 
-// releaseList 拉取仓库发布列表（单页最多 100 条，足以覆盖最新版本）。
+// releaseList 拉取仓库发布列表(单页最多 100 条,足以覆盖最新版本)。
 func (m *Manager) releaseList(ctx context.Context, repo string, perPage int) ([]release, error) {
 	var out []release
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=%d", repo, perPage)
+	if err := m.getJSON(ctx, url, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// tag 是 GitHub tag 列表中的一项。
+type tag struct {
+	Name string `json:"name"`
+}
+
+// tagList 拉取仓库的 tag 列表。
+// 注意列表顺序不保证版本降序(实测 anomalyco/opencode 首页第 15 项才是
+// v2.0.29,前面全是 vscode-v*),因此调用方必须自己过滤并比较大小。
+func (m *Manager) tagList(ctx context.Context, repo string, perPage int) ([]tag, error) {
+	var out []tag
+	url := fmt.Sprintf("https://api.github.com/repos/%s/tags?per_page=%d", repo, perPage)
 	if err := m.getJSON(ctx, url, &out); err != nil {
 		return nil, err
 	}
@@ -227,7 +251,7 @@ func (m *Manager) getJSON(ctx context.Context, url string, dst any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "zen-gateway")
 
 	resp, err := m.client.Do(req)
@@ -236,7 +260,7 @@ func (m *Manager) getJSON(ctx context.Context, url string, dst any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("github api status %d", resp.StatusCode)
+		return fmt.Errorf("upstream status %d for %s", resp.StatusCode, url)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
 		return fmt.Errorf("decode: %w", err)
@@ -244,8 +268,62 @@ func (m *Manager) getJSON(ctx context.Context, url string, dst any) error {
 	return nil
 }
 
-// fetchZen 取 opencode 最新正式 release 的 semver。
+// fetchZen 取 opencode 客户端的 semver。
+//
+// opencode 自 2.x 起只打 git tag、不再发 GitHub Release:
+// /releases/latest 至今仍停在 1.x。因此按权威程度依次尝试三种来源,
+// 前一个失败(网络不可达、格式不符、无匹配 tag)就换下一个:
+//
+//  1. npm @opencode/cli 的 latest dist-tag —— 与命令行 `npm i -g` 装到的版本一致
+//  2. GitHub releases/latest —— 旧渠道,官方恢复发 Release 后仍能生效
+//  3. GitHub tags —— 取最大的纯 semver tag(需排除 vscode-v* 等其它组件的 tag)
+//
+// 全部失败时返回错误,由 Refresh 保留上一次的值。
 func (m *Manager) fetchZen(ctx context.Context) (string, error) {
+	var errs []string
+	for _, source := range []struct {
+		name string
+		fn   func(context.Context) (string, error)
+	}{
+		{"npm dist-tag", m.fetchZenFromNPM},
+		{"github release", m.fetchZenFromRelease},
+		{"github tags", m.fetchZenFromTags},
+	} {
+		version, err := source.fn(ctx)
+		if err == nil {
+			return version, nil
+		}
+		errs = append(errs, source.name+": "+err.Error())
+	}
+	return "", fmt.Errorf("%s: %s", m.targets.OpencodeRepo, strings.Join(errs, "; "))
+}
+
+// npmDistTags 是 npm registry 的 dist-tags 响应(只取所需字段)。
+type npmDistTags struct {
+	Latest string `json:"latest"`
+}
+
+// fetchZenFromNPM 取 opencode 官方 CLI 的 latest dist-tag。
+func (m *Manager) fetchZenFromNPM(ctx context.Context) (string, error) {
+	pkg := strings.TrimSpace(m.targets.OpencodePackage)
+	if pkg == "" {
+		pkg = "@opencode/cli"
+	}
+	// 该端点仅 97 字节,远小于整包元数据(npm 全量文档可达数百 KB)。
+	url := "https://registry.npmjs.org/-/package/" + pkg + "/dist-tags"
+	var tags npmDistTags
+	if err := m.getJSON(ctx, url, &tags); err != nil {
+		return "", err
+	}
+	version := strings.TrimSpace(tags.Latest)
+	if !validVersion(version) {
+		return "", fmt.Errorf("unexpected npm latest %q", tags.Latest)
+	}
+	return version, nil
+}
+
+// fetchZenFromRelease 取 GitHub 最新正式 Release 的 tag。
+func (m *Manager) fetchZenFromRelease(ctx context.Context) (string, error) {
 	r, err := m.latestRelease(ctx, m.targets.OpencodeRepo)
 	if err != nil {
 		return "", err
@@ -255,6 +333,27 @@ func (m *Manager) fetchZen(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("unexpected opencode tag %q", tag)
 	}
 	return strings.TrimPrefix(tag, "v"), nil
+}
+
+// fetchZenFromTags 从 GitHub tag 列表中取最大的纯 semver tag。
+//
+// 该仓库的 tag 混有其它组件(vscode-v*),且列表顺序不保证新→旧,
+// 因此必须逐项过滤后按数值取最大,而不能直接取第一个。
+func (m *Manager) fetchZenFromTags(ctx context.Context) (string, error) {
+	list, err := m.tagList(ctx, m.targets.OpencodeRepo, 100)
+	if err != nil {
+		return "", err
+	}
+	var found []string
+	for _, t := range list {
+		if mm := zenTagRe.FindStringSubmatch(strings.TrimSpace(t.Name)); mm != nil {
+			found = append(found, mm[1])
+		}
+	}
+	if len(found) == 0 {
+		return "", fmt.Errorf("no semver tag found in %d tags", len(list))
+	}
+	return maxSemver(found), nil
 }
 
 // fetchClineCLI 从 cline 发布列表中挑出最大的 vX.Y.Z 主版本。

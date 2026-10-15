@@ -281,12 +281,18 @@ x-opencode-session / x-opencode-session-id:
 
 | 目标 | 来源 | 用途 |
 |---|---|---|
-| `zen` | `anomalyco/opencode` 最新正式 release（`v2.0.29` → `2.0.29`） | `User-Agent: opencode/latest/<v>/cli` |
-| `cline.cli` | `cline/cline` 发布列表中最大的 `v*`（排除 `cli-v*`、`desktop-v*`、`sdk/*`、预发布） | `X-CLIENT-VERSION`、`X-PLATFORM-VERSION`、`User-Agent` |
+| `zen` | npm `@opencode/cli` 的 `latest` dist-tag(优先级 1)→ GitHub `releases/latest`(2)→ GitHub tags 中最大的纯 semver tag(3) | `User-Agent: opencode/latest/<v>/cli` |
+| `cline.cli` | `cline/cline` 发布列表中最大的 `v*`(排除 `cli-v*`、`desktop-v*`、`sdk/*`、预发布) | `X-CLIENT-VERSION`、`X-PLATFORM-VERSION`、`User-Agent` |
 | `cline.sdk` | 同上列表中最大的 `sdk/sdk/v*` | `X-CORE-VERSION` |
 
-启动时立即抓取一次，之后每 24 小时刷新；抓取失败会保留上一次的值（首次失败使用内置兜底值），
+启动时立即抓取一次,之后每 24 小时刷新;抓取失败会保留上一次的值(首次失败使用内置兜底值),
 结果与失败原因均可在管理端查看。
+
+> **为什么 zen 不再只看 GitHub Release**:opencode 自 2.x 起只打 git tag、不再发 GitHub Release,
+> 其 `releases/latest` 至今仍停在 `1.19.0`(实测),而官方 CLI 已到 `2.0.29`(npm `latest`)。
+> 因此 zen 改为三级回落:任一来源不可达、格式不符或无匹配 tag 就换下一个。
+> 若未来官方恢复发 Release,第 2 级会自动生效。上游只校验 UA **形状**而不校验版本号,
+> 所以版本号短暂滞后不影响请求成功,但仍让它跟随真实客户端。
 
 ## 冷却与轮询
 

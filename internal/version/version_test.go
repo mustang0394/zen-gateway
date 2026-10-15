@@ -54,8 +54,8 @@ var clineReleases = []release{
 func TestRefreshClassifiesTags(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/repos/anomalyco/opencode/releases/latest":
-			json.NewEncoder(w).Encode(release{TagName: "v1.19.4"})
+		case r.URL.Path == "/-/package/@opencode/cli/dist-tags":
+			json.NewEncoder(w).Encode(npmDistTags{Latest: "1.19.4"})
 		case r.URL.Path == "/repos/cline/cline/releases":
 			json.NewEncoder(w).Encode(clineReleases)
 		default:
@@ -159,8 +159,12 @@ func TestUnreachableGithubUsesFallback(t *testing.T) {
 func TestRejectsInvalidVersion(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/-/package/@opencode/cli/dist-tags":
+			json.NewEncoder(w).Encode(npmDistTags{Latest: "not-a-version"})
 		case "/repos/anomalyco/opencode/releases/latest":
 			json.NewEncoder(w).Encode(release{TagName: "not-a-version"})
+		case "/repos/anomalyco/opencode/tags":
+			json.NewEncoder(w).Encode([]tag{{Name: "vscode-v1.0.0"}, {Name: "nightly"}})
 		case "/repos/cline/cline/releases":
 			json.NewEncoder(w).Encode([]release{{TagName: "desktop-v0.0.43"}, {TagName: "cli-v3.0.68"}})
 		default:
@@ -225,4 +229,87 @@ func TestStartDailyRefreshesImmediately(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("StartDaily did not refresh on startup, zen=%q", m.Zen())
+}
+
+// zenSourceServer 按来源逐个可控地返回响应:对应路径返回 ok 时给 body,否则 404。
+func zenSourceServer(t *testing.T, npmLatest, releaseTag, tags string) *Manager {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/-/package/@opencode/cli/dist-tags":
+			if npmLatest == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(npmDistTags{Latest: npmLatest})
+		case "/repos/anomalyco/opencode/releases/latest":
+			if releaseTag == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(release{TagName: releaseTag})
+		case "/repos/anomalyco/opencode/tags":
+			if tags == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			// 直接写原始 JSON(该参数就是 GitHub tag 列表的响应体)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(tags))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return newTestManager(t, srv.Listener.Addr().String())
+}
+
+// TestZenPrefersNPMDistTag 锁定首选来源:npm 的 latest dist-tag 才是官方 CLI
+// 的发布号。GitHub Releases 自 opencode 2.x 起不再更新(停在 1.x),因此
+// 即使 Release 接口能返回,也必须优先采用 npm 的 2.x。
+func TestZenPrefersNPMDistTag(t *testing.T) {
+	// Release 仍停在 1.x(线上真实情况),npm 已是 2.x
+	m := zenSourceServer(t, "2.0.29", "v1.19.4", `[{"name":"v2.0.28"}]`)
+
+	if _, err := m.fetchZen(context.Background()); err != nil {
+		t.Fatalf("fetchZen: %v", err)
+	}
+	if got := m.Get(NameZen); got != "2.0.29" {
+		t.Errorf("zen = %q, want 2.0.29 (npm must win over the stale release)", got)
+	}
+}
+
+// TestZenFallsBackToRelease 验证 npm 不可用时回落到 GitHub Release。
+func TestZenFallsBackToRelease(t *testing.T) {
+	m := zenSourceServer(t, "", "v1.19.4", `[{"name":"v1.19.3"}]`)
+	if got, err := m.fetchZen(context.Background()); err != nil || got != "1.19.4" {
+		t.Errorf("fetchZen = %q, %v; want 1.19.4 from release", got, err)
+	}
+}
+
+// TestZenFallsBackToTags 验证 npm 与 Release 都不可用时回落到 tag 列表,
+// 并且能跳过 vscode-v* 等其它组件的 tag、按数值取最大。
+func TestZenFallsBackToTags(t *testing.T) {
+	tags := `[{"name":"vscode-v1.0.0"},{"name":"v2.0.29"},{"name":"v2.0.9"},{"name":"nightly"}]`
+	m := zenSourceServer(t, "", "", tags)
+
+	got, err := m.fetchZen(context.Background())
+	if err != nil {
+		t.Fatalf("fetchZen: %v", err)
+	}
+	if got != "2.0.29" {
+		t.Errorf("fetchZen = %q, want 2.0.29 (numeric max, vscode-* skipped)", got)
+	}
+}
+
+// TestZenAllSourcesFail 验证三个来源全失败时报错(由 Refresh 保留旧值)。
+func TestZenAllSourcesFail(t *testing.T) {
+	m := zenSourceServer(t, "not-a-version", "v1.2", `[{"name":"vscode-v1.0.0"}]`)
+
+	if _, err := m.fetchZen(context.Background()); err == nil {
+		t.Fatal("expected an error when every source is unusable")
+	}
+	if got := m.Get(NameZen); got != fallback[NameZen] {
+		t.Errorf("zen should keep the previous value on total failure, got %q", got)
+	}
 }
